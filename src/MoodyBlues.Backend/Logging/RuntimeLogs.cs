@@ -25,59 +25,32 @@ public sealed class RuntimeLogs : IDisposable
 {
     private const string Separator = "----------------------------------------------------------------------------------------------------";
 
-    private readonly object _binaryLock = new();
-    private readonly object _eventLock = new();
-    private readonly StreamWriter _binaryWriter;
-    private readonly StreamWriter _eventWriter;
+    private readonly FileLogChannel _binaryLog;
+    private readonly FileLogChannel _eventLog;
 
-    public string BinaryLogPath { get; }
-    public string EventLogPath { get; }
+    public string BinaryLogPath => _binaryLog.Path;
+    public string EventLogPath => _eventLog.Path;
 
     public RuntimeLogs(string logDir, string binaryFilename, string eventFilename)
     {
         Directory.CreateDirectory(logDir);
-
-        BinaryLogPath = Path.Combine(logDir, binaryFilename);
-        EventLogPath = Path.Combine(logDir, eventFilename);
-
-        _binaryWriter = new StreamWriter(new FileStream(BinaryLogPath, FileMode.Append, FileAccess.Write, FileShare.Read), Encoding.UTF8)
-        {
-            AutoFlush = true,
-        };
-        _eventWriter = new StreamWriter(new FileStream(EventLogPath, FileMode.Append, FileAccess.Write, FileShare.Read), Encoding.UTF8)
-        {
-            AutoFlush = true,
-        };
+        _binaryLog = new FileLogChannel(Path.Combine(logDir, binaryFilename));
+        _eventLog = new FileLogChannel(Path.Combine(logDir, eventFilename));
     }
 
     private static string Timestamp() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
 
-    private static double? EncodedTimeOf(IReadOnlyList<MoodyEvent>? decodedEvents) =>
+    private static double? EncodedTimeOf(IReadOnlyList<MoodyEvent> decodedEvents) =>
         decodedEvents is { Count: > 0 } && decodedEvents[0] is TimeStampEvent ts ? ts.Seconds : null;
 
-    /// <summary>Record that a binary packet was received (Binary Log).</summary>
-    public void LogBinaryPacket(int connectionId, int messageNumber, int size, IReadOnlyList<MoodyEvent>? decodedEvents)
-    {
-        string encodedTimeStr = decodedEvents is null
-            ? "n/a (decode failed)"
-            : EncodedTimeOf(decodedEvents) is { } t
-                ? $"{t.ToString("F6", CultureInfo.InvariantCulture)}s"
-                : "n/a (continuation message)";
-
-        string line = $"{Timestamp()} | conn={connectionId} msg=#{messageNumber} size={size}B encoded_time={encodedTimeStr}";
-
-        lock (_binaryLock)
-        {
-            _binaryWriter.WriteLine(line);
-        }
-    }
-
-    /// <summary>Record every decoded event for one packet (Event Log).</summary>
-    public void LogDecodedEvents(int connectionId, int messageNumber, int size, IReadOnlyList<MoodyEvent> decodedEvents)
+    /// <summary>Record a successfully decoded message: one binary-log line plus its full event-log block.</summary>
+    public void LogMessage(int connectionId, int messageNumber, int size, IReadOnlyList<MoodyEvent> decodedEvents)
     {
         string encodedTimeStr = EncodedTimeOf(decodedEvents) is { } t
             ? $"{t.ToString("F6", CultureInfo.InvariantCulture)}s"
-            : "n/a";
+            : "n/a (continuation message)";
+
+        _binaryLog.WriteLine($"{Timestamp()} | conn={connectionId} msg=#{messageNumber} size={size}B encoded_time={encodedTimeStr}");
 
         var sb = new StringBuilder();
         sb.Append(Timestamp()).Append(" | ");
@@ -91,28 +64,49 @@ public sealed class RuntimeLogs : IDisposable
         }
 
         sb.Append(Separator);
-
-        lock (_eventLock)
-        {
-            _eventWriter.WriteLine(sb.ToString());
-        }
+        _eventLog.WriteLine(sb.ToString());
     }
 
-    /// <summary>Record that a packet failed to decode (Event Log).</summary>
-    public void LogDecodeError(int connectionId, int messageNumber, int size, Exception error)
+    /// <summary>Record a message that failed to decode: one binary-log line plus an error block in the event log.</summary>
+    public void LogDecodeFailure(int connectionId, int messageNumber, int size, Exception error)
     {
-        string block = $"{Timestamp()} | Connection #{connectionId} | Message #{messageNumber} | {size} bytes | " +
-                        $"DECODE FAILED: {error.Message}\n{Separator}";
-
-        lock (_eventLock)
-        {
-            _eventWriter.WriteLine(block);
-        }
+        _binaryLog.WriteLine($"{Timestamp()} | conn={connectionId} msg=#{messageNumber} size={size}B encoded_time=n/a (decode failed)");
+        _eventLog.WriteLine(
+            $"{Timestamp()} | Connection #{connectionId} | Message #{messageNumber} | {size} bytes | " +
+            $"DECODE FAILED: {error.Message}\n{Separator}");
     }
 
     public void Dispose()
     {
-        _binaryWriter.Dispose();
-        _eventWriter.Dispose();
+        _binaryLog.Dispose();
+        _eventLog.Dispose();
+    }
+
+    /// <summary>A single append-only, thread-safe log file (path + writer + lock bundled together).</summary>
+    private sealed class FileLogChannel : IDisposable
+    {
+        private readonly object _lock = new();
+        private readonly StreamWriter _writer;
+
+        public string Path { get; }
+
+        public FileLogChannel(string path)
+        {
+            Path = path;
+            _writer = new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read), Encoding.UTF8)
+            {
+                AutoFlush = true,
+            };
+        }
+
+        public void WriteLine(string line)
+        {
+            lock (_lock)
+            {
+                _writer.WriteLine(line);
+            }
+        }
+
+        public void Dispose() => _writer.Dispose();
     }
 }

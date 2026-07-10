@@ -75,6 +75,7 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
 
             int connectionId = Interlocked.Increment(ref _nextConnectionId);
             connectionTasks.Add(HandleConnectionAsync(context, connectionId, cancellationToken));
+            connectionTasks.RemoveAll(t => t.IsCompleted);
         }
 
         await Task.WhenAll(connectionTasks);
@@ -99,10 +100,7 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         string peer = context.Request.RemoteEndPoint?.ToString() ?? "unknown";
         ConsoleLog.Info($"Connection #{connectionId} opened from {peer}");
 
-        int messageCount = 0;
-        int eventCount = 0;
-        var eventTypeCounts = new Dictionary<string, int>();
-
+        var stats = new ConnectionStats();
         var receiveBuffer = new byte[8192];
         using var messageStream = new MemoryStream();
 
@@ -110,73 +108,14 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         {
             while (socket.State == WebSocketState.Open)
             {
-                messageStream.SetLength(0);
-                WebSocketReceiveResult result;
-                do
+                byte[]? message = await ReceiveMessageAsync(socket, messageStream, receiveBuffer, connectionId, cancellationToken);
+                if (message is null)
                 {
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        break;
-                    }
-
-                    messageStream.Write(receiveBuffer, 0, result.Count);
-                } while (!result.EndOfMessage);
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", cancellationToken);
                     break;
                 }
 
-                if (result.MessageType == WebSocketMessageType.Text)
-                {
-                    ConsoleLog.Warn(
-                        $"Connection #{connectionId}: ignoring unexpected TEXT message ({messageStream.Length} chars) -- " +
-                        "Spec.md says binary only");
-                    continue;
-                }
-
-                messageCount++;
-                byte[] message = messageStream.ToArray();
-                int size = message.Length;
-
-                if (config.LogRawBytes)
-                {
-                    int previewLen = Math.Min(32, size);
-                    string preview = Convert.ToHexString(message, 0, previewLen);
-                    ConsoleLog.Debug(
-                        $"Connection #{connectionId}: message #{messageCount} received, {size} bytes. " +
-                        $"First bytes: {preview}{(size > 32 ? " ..." : string.Empty)}");
-                }
-
-                List<MoodyEvent>? decodedEvents = null;
-                try
-                {
-                    decodedEvents = EventParser.ParseMessage(message);
-                }
-                catch (ProtocolException ex)
-                {
-                    ConsoleLog.Error(
-                        $"Connection #{connectionId}: failed to decode message #{messageCount} ({size} bytes): " +
-                        Convert.ToHexString(message),
-                        ex);
-                    runtimeLogs.LogBinaryPacket(connectionId, messageCount, size, null);
-                    runtimeLogs.LogDecodeError(connectionId, messageCount, size, ex);
-                    continue;
-                }
-
-                runtimeLogs.LogBinaryPacket(connectionId, messageCount, size, decodedEvents);
-                runtimeLogs.LogDecodedEvents(connectionId, messageCount, size, decodedEvents);
-
-                ConsoleLog.Info($"Connection #{connectionId}: message #{messageCount} -> {size} bytes, {decodedEvents.Count} event(s)");
-
-                foreach (var evt in decodedEvents)
-                {
-                    eventCount++;
-                    string typeName = evt.GetType().Name;
-                    eventTypeCounts[typeName] = eventTypeCounts.GetValueOrDefault(typeName) + 1;
-                }
+                stats.MessageCount++;
+                ProcessMessage(message, connectionId, stats.MessageCount, runtimeLogs, stats);
             }
         }
         catch (OperationCanceledException)
@@ -193,9 +132,109 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         }
         finally
         {
-            string breakdown = string.Join(", ", eventTypeCounts.Select(kv => $"{kv.Key}={kv.Value}"));
-            ConsoleLog.Info($"Connection #{connectionId} summary: {messageCount} message(s), {eventCount} event(s) -- breakdown: {{{breakdown}}}");
+            ConsoleLog.Info($"Connection #{connectionId} summary: {stats.MessageCount} message(s), {stats.EventCount} event(s) -- breakdown: {{{stats.Breakdown()}}}");
             socket.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Reads one complete WebSocket message (across however many frames it
+    /// spans) and returns its bytes, or <c>null</c> if the connection is
+    /// closing. Unexpected TEXT messages are logged and skipped.
+    /// </summary>
+    private static async Task<byte[]?> ReceiveMessageAsync(
+        WebSocket socket,
+        MemoryStream messageStream,
+        byte[] receiveBuffer,
+        int connectionId,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            messageStream.SetLength(0);
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    break;
+                }
+
+                messageStream.Write(receiveBuffer, 0, result.Count);
+            } while (!result.EndOfMessage);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", cancellationToken);
+                return null;
+            }
+
+            if (result.MessageType == WebSocketMessageType.Text)
+            {
+                ConsoleLog.Warn(
+                    $"Connection #{connectionId}: ignoring unexpected TEXT message ({messageStream.Length} chars) -- " +
+                    "Spec.md says binary only");
+                continue;
+            }
+
+            return messageStream.ToArray();
+        }
+    }
+
+    /// <summary>Decodes one binary message, writes it to the runtime logs, and updates connection stats.</summary>
+    private void ProcessMessage(byte[] message, int connectionId, int messageNumber, RuntimeLogs runtimeLogs, ConnectionStats stats)
+    {
+        int size = message.Length;
+
+        if (config.LogRawBytes)
+        {
+            int previewLen = Math.Min(32, size);
+            string preview = Convert.ToHexString(message, 0, previewLen);
+            ConsoleLog.Debug(
+                $"Connection #{connectionId}: message #{messageNumber} received, {size} bytes. " +
+                $"First bytes: {preview}{(size > 32 ? " ..." : string.Empty)}");
+        }
+
+        List<MoodyEvent> decodedEvents;
+        try
+        {
+            decodedEvents = EventParser.ParseMessage(message);
+        }
+        catch (ProtocolException ex)
+        {
+            ConsoleLog.Error(
+                $"Connection #{connectionId}: failed to decode message #{messageNumber} ({size} bytes): " +
+                Convert.ToHexString(message),
+                ex);
+            runtimeLogs.LogDecodeFailure(connectionId, messageNumber, size, ex);
+            return;
+        }
+
+        runtimeLogs.LogMessage(connectionId, messageNumber, size, decodedEvents);
+        ConsoleLog.Info($"Connection #{connectionId}: message #{messageNumber} -> {size} bytes, {decodedEvents.Count} event(s)");
+        stats.AddEvents(decodedEvents);
+    }
+
+    /// <summary>Per-connection running totals, used only for the closing summary line.</summary>
+    private sealed class ConnectionStats
+    {
+        private readonly Dictionary<string, int> _eventTypeCounts = new();
+
+        public int MessageCount { get; set; }
+
+        public int EventCount { get; private set; }
+
+        public void AddEvents(IReadOnlyList<MoodyEvent> events)
+        {
+            foreach (var evt in events)
+            {
+                EventCount++;
+                string typeName = evt.GetType().Name;
+                _eventTypeCounts[typeName] = _eventTypeCounts.GetValueOrDefault(typeName) + 1;
+            }
+        }
+
+        public string Breakdown() => string.Join(", ", _eventTypeCounts.Select(kv => $"{kv.Key}={kv.Value}"));
     }
 }
