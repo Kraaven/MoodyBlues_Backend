@@ -47,6 +47,16 @@ public sealed class ServerConfig
     /// <summary>Directory uploaded scene .glb files are written to (one subfolder per developer).</summary>
     public string ScenesDir { get; init; } = "scenes";
 
+    /// <summary>
+    /// Symmetric signing secret for the dashboard's JWTs (see <see cref="MoodyBlues.Backend.Auth.JwtTokenService"/>).
+    /// The default is an insecure placeholder -- <c>Program.cs</c> logs a warning at startup if it's still in use,
+    /// and production deployments must set <c>MOODYBLUES_JWT_SECRET</c> to a real random secret (at least 32 bytes).
+    /// </summary>
+    public string JwtSecret { get; init; } = "insecure-dev-only-jwt-secret-change-me-1234567890";
+
+    /// <summary>Origin the dashboard SPA is served from during local development, allowed via CORS.</summary>
+    public string CorsOrigin { get; init; } = "http://localhost:5173";
+
     public static ServerConfig FromEnvironment()
     {
         return new ServerConfig
@@ -65,6 +75,8 @@ public sealed class ServerConfig
             DbConnectionString = Environment.GetEnvironmentVariable("MOODYBLUES_DB_CONNECTION")
                 ?? "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues",
             ScenesDir = Environment.GetEnvironmentVariable("MOODYBLUES_SCENES_DIR") ?? "scenes",
+            JwtSecret = Environment.GetEnvironmentVariable("MOODYBLUES_JWT_SECRET") ?? "insecure-dev-only-jwt-secret-change-me-1234567890",
+            CorsOrigin = Environment.GetEnvironmentVariable("MOODYBLUES_CORS_ORIGIN") ?? "http://localhost:5173",
         };
     }
 

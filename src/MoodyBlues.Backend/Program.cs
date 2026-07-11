@@ -1,17 +1,25 @@
-﻿using Microsoft.AspNetCore.Builder;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Handshake;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Projects;
 using MoodyBlues.Backend.Scenes;
 using MoodyBlues.Backend.Server;
 
 var config = ServerConfig.FromEnvironment();
+
+if (config.JwtSecret == "insecure-dev-only-jwt-secret-change-me-1234567890")
+{
+    ConsoleLog.Warn("MOODYBLUES_JWT_SECRET is not set -- using the insecure development default. Set it before deploying.");
+}
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls($"http://{config.Host}:{config.Port}");
@@ -20,8 +28,22 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton(new RuntimeLogs(config.LogDir, config.BinaryLogFilename, config.EventLogFilename));
 builder.Services.AddSingleton<PendingSessionStore>();
 builder.Services.AddSingleton<MoodyBluesServer>();
+builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("dashboard", policy => policy
+        .WithOrigins(config.CorsOrigin)
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options => options.TokenValidationParameters = new JwtTokenService(config).BuildValidationParameters());
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
@@ -31,11 +53,17 @@ using (var migrationScope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
+app.UseCors("dashboard");
 app.UseRequestDecompression();
 app.UseWebSockets();
+app.UseAuthentication();
+app.UseAuthorization();
 
 HandshakeEndpoints.Map(app);
 SceneUploadEndpoints.Map(app);
+AuthEndpoints.Map(app);
+ProjectEndpoints.Map(app);
+SceneEndpoints.Map(app);
 
 app.Map("/stream", async (HttpContext context, MoodyBluesServer server, PendingSessionStore sessions) =>
 {

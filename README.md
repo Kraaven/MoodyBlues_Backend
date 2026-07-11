@@ -8,6 +8,10 @@ C# (.NET) backend for the MoodyBlues Unity project. It's an ASP.NET Core host th
 - Hosts the WebSocket server (`/stream`) that receives the binary transform-streaming protocol
   described in `Spec.md` (see the Unity project at `MoodyBlues_Unity/Spec.md`) and decodes it into
   structured events.
+- Serves a JWT-authenticated dashboard API (`/auth/*`, `/api/projects`, `/api/scenes/...`) backing
+  the companion [Moody_FrontEnd](../Moody_FrontEnd) React app -- account registration/login,
+  Projects (each with a `DeveloperId` used by the Unity-facing endpoints above), and per-scene
+  rename/download for the in-browser GLB viewer. See "Dashboard API" below.
 
 ## Requirements
 
@@ -57,6 +61,8 @@ Before starting the stack, create a `.env` file next to `docker-compose.yml` wit
 
 ```
 MOODYBLUES_PUBLIC_HOST=your-domain.example.com
+MOODYBLUES_JWT_SECRET=<a long random secret, e.g. `openssl rand -base64 48`>
+MOODYBLUES_CORS_ORIGIN=https://your-dashboard-domain.example.com
 ```
 
 See "HTTPS/TLS" immediately below for what this needs to point at and why.
@@ -133,6 +139,8 @@ Configuration is via environment variables (all optional):
 | `MOODYBLUES_LOG_DIR` | `logs` | Directory for the runtime log files below |
 | `MOODYBLUES_DB_CONNECTION` | `Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues` | Postgres connection string (Developers/Scenes metadata) |
 | `MOODYBLUES_SCENES_DIR` | `scenes` | Directory uploaded `.glb` files are written to (one subfolder per developer) |
+| `MOODYBLUES_JWT_SECRET` | insecure dev-only placeholder | Symmetric secret signing dashboard JWTs -- **must** be set to a real random secret (32+ bytes) in production; the server logs a startup warning if it's still the default |
+| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Origin the dashboard SPA is served from, allowed via CORS |
 
 ### Runtime logs
 
@@ -184,26 +192,86 @@ up to date. No GLTF parsing happens server-side this milestone (see `Scenes/Scen
 -- building a server-side object registry from the file's `node.extras.objectId` values is a later
 milestone.
 
+## Dashboard API
+
+Everything below is consumed by the [Moody_FrontEnd](../Moody_FrontEnd) SPA, not by Unity. Every
+route except `/auth/register` and `/auth/login` requires `Authorization: Bearer <token>` (issued by
+those two). Ownership is always enforced server-side -- a user can only see/rename/download their
+own Projects/Scenes.
+
+### `POST /auth/register`, `POST /auth/login`
+
+```json
+{ "email": "you@example.com", "password": "at-least-8-chars" }
+```
+
+->
+
+```json
+{ "token": "<jwt>", "userId": "guid", "email": "you@example.com" }
+```
+
+### `GET /auth/me`
+
+Returns `{ "userId": "guid", "email": "..." }` for the caller's token.
+
+### `GET /api/projects`
+
+Lists the caller's projects: `[{ "id", "name", "developerId", "createdAtUtc", "sceneCount" }]`.
+
+### `POST /api/projects`
+
+Body `{ "name": "My Game" }`. Creates a project with a freshly generated, unique `developerId` --
+this is the exact same `developerId` value Unity's `POST /handshake` and `POST /scenes/{sceneId}`
+already key off of (see "HTTP API" above), so pasting it into the Unity client's config is all
+that's needed to start uploading scenes into this project.
+
+### `GET /api/projects/{id}`
+
+Project detail plus its scenes (joined by `developerId`):
+`{ "id", "name", "developerId", "createdAtUtc", "scenes": [{ "sceneId", "displayName", "updatedAtUtc" }] }`.
+
+### `PATCH /api/scenes/{developerId}/{sceneId}`
+
+Body `{ "displayName": "Living Room v2" }` (or `null`/blank to clear it). Dashboard-only rename --
+`sceneId` (what Unity/the wire protocol use) is never changed.
+
+### `GET /api/scenes/{developerId}/{sceneId}/file`
+
+Streams the stored `.glb` as `model/gltf-binary`. This is what the frontend's rebuilt GLB viewer
+fetches to render the model.
+
 ## Project layout
 
 ```
 src/MoodyBlues.Backend/
   Program.cs                  Entry point: ASP.NET Core host, DI wiring, endpoint mapping
   Config/
-    ServerConfig.cs            Host/port/log/DB/scenes settings, read from env vars
+    ServerConfig.cs            Host/port/log/DB/scenes/JWT/CORS settings, read from env vars
   Common/
     PathSegments.cs             Validates untrusted IDs before they touch the filesystem/URLs
+    IdGenerator.cs               Short opaque random tokens (Project.DeveloperId)
   Data/
     MoodyBluesDbContext.cs      EF Core context (Postgres via Npgsql)
-    Developer.cs, Scene.cs      Entities
+    Developer.cs, Scene.cs      Entities (Unity-facing)
+    User.cs, Project.cs         Entities (dashboard-facing)
+    DeveloperProvisioning.cs     Shared "create Developer row if missing" logic
     MoodyBluesDbContextFactory.cs  Design-time factory for `dotnet ef migrations`
   Migrations/                  EF Core migrations
+  Auth/
+    PasswordHasher.cs            PBKDF2 hash/verify
+    JwtTokenService.cs            Issues/validates dashboard JWTs
+    CurrentUser.cs                 Reads the caller's user id out of JWT claims
+    AuthContracts.cs, AuthEndpoints.cs  POST /auth/register, /auth/login, GET /auth/me
   Handshake/
     HandshakeContracts.cs       Request/response DTOs
     HandshakeEndpoints.cs       POST /handshake
     PendingSessionStore.cs      In-memory handshake-to-WebSocket session correlation
+  Projects/
+    ProjectContracts.cs, ProjectEndpoints.cs  /api/projects (list/create/detail)
   Scenes/
-    SceneUploadEndpoints.cs     POST /scenes/{sceneId}
+    SceneUploadEndpoints.cs     POST /scenes/{sceneId} (Unity-facing, unauthenticated)
+    SceneContracts.cs, SceneEndpoints.cs  /api/scenes/{developerId}/{sceneId} (dashboard-facing, authorized)
   Logging/
     ConsoleLog.cs                Simple timestamped, colorized console logging
     RuntimeLogs.cs                binary.log / events.log file writers
@@ -222,6 +290,10 @@ tests/MoodyBlues.Backend.Tests/
   ProtocolParserTests.cs        Round-trip / known-vector tests for the decoder
   HandshakeEndpointsTests.cs     Tests for POST /handshake (EF Core InMemory + fake HttpContext)
   SceneUploadEndpointsTests.cs   Tests for POST /scenes/{sceneId}
+  TestPrincipal.cs               Builds a fake authenticated ClaimsPrincipal for endpoint tests
+  AuthEndpointsTests.cs          Tests for /auth/register, /auth/login
+  ProjectEndpointsTests.cs       Tests for /api/projects
+  SceneEndpointsTests.cs         Tests for /api/scenes/{developerId}/{sceneId} rename + file download
 Dockerfile                      Multi-stage build for the backend image
 docker-compose.yml               Postgres + backend stack definition (see "HTTPS/TLS" for how
                                   it plugs into an existing reverse proxy)

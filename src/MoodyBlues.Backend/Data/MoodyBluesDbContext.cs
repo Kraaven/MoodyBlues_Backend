@@ -13,6 +13,10 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
 
     public DbSet<Scene> Scenes => Set<Scene>();
 
+    public DbSet<User> Users => Set<User>();
+
+    public DbSet<Project> Projects => Set<Project>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Developer>(entity =>
@@ -26,6 +30,21 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             entity.HasOne<Developer>()
                 .WithMany()
                 .HasForeignKey(s => s.DeveloperId);
+        });
+
+        modelBuilder.Entity<User>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.HasIndex(u => u.Email).IsUnique();
+        });
+
+        modelBuilder.Entity<Project>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => p.DeveloperId).IsUnique();
+            entity.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(p => p.UserId);
         });
     }
 }

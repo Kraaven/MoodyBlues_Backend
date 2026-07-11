@@ -40,7 +40,7 @@ public static class HandshakeEndpoints
             return Results.BadRequest("developerId and sceneId must not contain path separators.");
         }
 
-        await EnsureDeveloperExistsAsync(db, request.DeveloperId);
+        await DeveloperProvisioning.EnsureExistsAsync(db, request.DeveloperId);
 
         Data.Scene? scene = await db.Scenes.FindAsync(request.DeveloperId, request.SceneId);
         bool sceneUploadRequired = scene is null || scene.Hash != request.SceneHash;
@@ -76,25 +76,5 @@ public static class HandshakeEndpoints
         bool isHttps = string.Equals(config.PublicScheme, "https", StringComparison.OrdinalIgnoreCase);
         bool isDefaultPort = isHttps ? port == 443 : port == 80;
         return isDefaultPort ? config.PublicHost : $"{config.PublicHost}:{port}";
-    }
-
-    /// <summary>Auto-provisions a Developer row on first sight -- there is no registration/auth endpoint yet.</summary>
-    private static async Task EnsureDeveloperExistsAsync(MoodyBluesDbContext db, string developerId)
-    {
-        bool exists = await db.Developers.AnyAsync(d => d.Id == developerId);
-        if (exists)
-        {
-            return;
-        }
-
-        db.Developers.Add(new Data.Developer { Id = developerId, CreatedAtUtc = DateTime.UtcNow });
-        try
-        {
-            await db.SaveChangesAsync();
-        }
-        catch (DbUpdateException)
-        {
-            // Lost a race with a concurrent handshake auto-provisioning the same developer -- fine, it exists now.
-        }
     }
 }

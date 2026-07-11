@@ -41,6 +41,11 @@ services:
       MOODYBLUES_PUBLIC_PORT: "443"
       MOODYBLUES_PORT: "8765"
       MOODYBLUES_DB_CONNECTION: "Host=db;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues"
+      # Signs dashboard JWTs -- set a real random secret (32+ bytes) in the .env file next to this
+      # compose file. Do NOT ship the insecure code default to production.
+      MOODYBLUES_JWT_SECRET: "${MOODYBLUES_JWT_SECRET:?Set MOODYBLUES_JWT_SECRET in a .env file to a random secret}"
+      # Origin the deployed dashboard SPA is served from (e.g. https://dashboard.example.com).
+      MOODYBLUES_CORS_ORIGIN: "${MOODYBLUES_CORS_ORIGIN:?Set MOODYBLUES_CORS_ORIGIN in a .env file to the dashboard's origin}"
     volumes:
       - moodyblues-logs:/app/logs
       - moodyblues-scenes:/app/scenes
