@@ -27,6 +27,10 @@ services:
     environment:
       # Bind all interfaces inside the container so the host port mapping below works.
       MOODYBLUES_HOST: "0.0.0.0"
+      # The address/hostname clients can actually reach this box on -- handed back in
+      # webSocketUrl/sceneUploadUrl by POST /handshake. Set this in a .env file next to this
+      # compose file (MOODYBLUES_PUBLIC_HOST=<server-ip-or-domain>); it must NOT be 0.0.0.0.
+      MOODYBLUES_PUBLIC_HOST: "${MOODYBLUES_PUBLIC_HOST:?Set MOODYBLUES_PUBLIC_HOST in a .env file to the server's public IP or hostname}"
       MOODYBLUES_PORT: "8765"
       MOODYBLUES_DB_CONNECTION: "Host=db;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues"
     ports:

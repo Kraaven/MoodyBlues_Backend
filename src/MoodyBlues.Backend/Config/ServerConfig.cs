@@ -10,6 +10,15 @@ public sealed class ServerConfig
     public int Port { get; init; } = 8765;
     public bool LogRawBytes { get; init; } = true;
 
+    /// <summary>
+    /// Host/IP handed back to clients in <c>webSocketUrl</c>/<c>sceneUploadUrl</c> (see
+    /// HandshakeEndpoints.cs). Deliberately separate from <see cref="Host"/>: that one is the
+    /// Kestrel *bind* address and is typically "0.0.0.0" in Docker, which is not a value a
+    /// client can ever connect back to. Defaults to <see cref="Host"/> for the plain
+    /// `dotnet run` case where binding to localhost and reaching it as localhost are the same.
+    /// </summary>
+    public string PublicHost { get; init; } = "localhost";
+
     // Runtime log files (see Logging/RuntimeLogs.cs): binary.log tracks raw
     // packet reception, events.log tracks every decoded event.
     public string LogDir { get; init; } = "logs";
@@ -28,6 +37,9 @@ public sealed class ServerConfig
         {
             Host = Environment.GetEnvironmentVariable("MOODYBLUES_HOST") ?? "localhost",
             Port = TryParseInt(Environment.GetEnvironmentVariable("MOODYBLUES_PORT"), 8765),
+            PublicHost = Environment.GetEnvironmentVariable("MOODYBLUES_PUBLIC_HOST")
+                ?? Environment.GetEnvironmentVariable("MOODYBLUES_HOST")
+                ?? "localhost",
             LogRawBytes = !IsFalsey(Environment.GetEnvironmentVariable("MOODYBLUES_LOG_RAW_BYTES")),
             LogDir = Environment.GetEnvironmentVariable("MOODYBLUES_LOG_DIR") ?? "logs",
             BinaryLogFilename = Environment.GetEnvironmentVariable("MOODYBLUES_BINARY_LOG_FILENAME") ?? "binary.log",

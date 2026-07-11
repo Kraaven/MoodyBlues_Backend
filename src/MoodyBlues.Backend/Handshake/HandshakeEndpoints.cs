@@ -49,9 +49,9 @@ public static class HandshakeEndpoints
         // connection belongs to -- the binary event wire protocol itself carries no such context.
         sessions.Put(request.SessionId, request.DeveloperId, request.SceneId);
 
-        string webSocketUrl = $"ws://{config.Host}:{config.Port}/stream?session={Uri.EscapeDataString(request.SessionId)}";
+        string webSocketUrl = $"ws://{config.PublicHost}:{config.Port}/stream?session={Uri.EscapeDataString(request.SessionId)}";
         string? sceneUploadUrl = sceneUploadRequired
-            ? $"http://{config.Host}:{config.Port}/scenes/{Uri.EscapeDataString(request.SceneId)}" +
+            ? $"http://{config.PublicHost}:{config.Port}/scenes/{Uri.EscapeDataString(request.SceneId)}" +
               $"?developerId={Uri.EscapeDataString(request.DeveloperId)}&sceneHash={Uri.EscapeDataString(request.SceneHash)}"
             : null;
 
