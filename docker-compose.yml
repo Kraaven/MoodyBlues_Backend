@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: moodyblues
+      POSTGRES_USER: moodyblues
+      POSTGRES_PASSWORD: moodyblues
+    ports:
+      - "5432:5432"
+    volumes:
+      - moodyblues-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moodyblues -d moodyblues"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Bind all interfaces inside the container so the host port mapping below works.
+      MOODYBLUES_HOST: "0.0.0.0"
+      MOODYBLUES_PORT: "8765"
+      MOODYBLUES_DB_CONNECTION: "Host=db;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues"
+    ports:
+      - "8765:8765"
+    volumes:
+      - moodyblues-logs:/app/logs
+      - moodyblues-scenes:/app/scenes
+
+volumes:
+  moodyblues-db-data:
+  moodyblues-logs:
+  moodyblues-scenes:

@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.WebSockets;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Logging;
@@ -7,97 +6,25 @@ using MoodyBlues.Backend.Protocol;
 namespace MoodyBlues.Backend.Server;
 
 /// <summary>
-/// HttpListener-based WebSocket server that receives the Unity binary event
-/// stream.
+/// Decodes the Unity binary event stream for one already-accepted WebSocket
+/// connection at a time (see the <c>/stream</c> minimal API route in
+/// Program.cs, which does the HTTP-to-WebSocket upgrade and session-token
+/// validation before handing the socket off here).
 ///
 /// For this milestone the server has no persistent object store yet -- it
-/// just accepts connections, decodes every event per Spec.md, and logs
-/// everything in detail (console + the two runtime log files) so the wire
-/// protocol can be validated end-to-end against the real Unity client
+/// just decodes every event per Spec.md and logs everything in detail
+/// (console + the two runtime log files) so the wire protocol can be
+/// validated end-to-end against the real Unity client
 /// (<c>BluesStreamer.ConnectAsync</c>, which connects to us).
 /// </summary>
 public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLogs)
 {
     private int _nextConnectionId;
 
-    public async Task RunAsync(CancellationToken cancellationToken)
+    /// <summary>Owns one WebSocket connection end-to-end: receive loop, decode, log, summary. Disposes <paramref name="socket"/>.</summary>
+    public async Task HandleConnectionAsync(WebSocket socket, string peer, CancellationToken cancellationToken)
     {
-        string prefix = $"http://{config.Host}:{config.Port}/";
-        using var listener = new HttpListener();
-        listener.Prefixes.Add(prefix);
-        listener.Start();
-
-        using var registration = cancellationToken.Register(() =>
-        {
-            try
-            {
-                listener.Stop();
-            }
-            catch (ObjectDisposedException)
-            {
-                // already stopped
-            }
-        });
-
-        ConsoleLog.Info($"Runtime logs: binary={runtimeLogs.BinaryLogPath} events={runtimeLogs.EventLogPath}");
-        ConsoleLog.Info(
-            $"MoodyBlues backend listening on ws://{config.Host}:{config.Port}/ " +
-            "(Unity client connects here, per Spec.md Section 1)");
-
-        var connectionTasks = new List<Task>();
-
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            HttpListenerContext context;
-            try
-            {
-                context = await listener.GetContextAsync();
-            }
-            catch (Exception) when (cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (HttpListenerException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-
-            if (!context.Request.IsWebSocketRequest)
-            {
-                context.Response.StatusCode = 400;
-                context.Response.Close();
-                continue;
-            }
-
-            int connectionId = Interlocked.Increment(ref _nextConnectionId);
-            connectionTasks.Add(HandleConnectionAsync(context, connectionId, cancellationToken));
-            connectionTasks.RemoveAll(t => t.IsCompleted);
-        }
-
-        await Task.WhenAll(connectionTasks);
-    }
-
-    private async Task HandleConnectionAsync(HttpListenerContext context, int connectionId, CancellationToken cancellationToken)
-    {
-        WebSocketContext wsContext;
-        try
-        {
-            wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
-        }
-        catch (Exception ex)
-        {
-            ConsoleLog.Error($"Connection #{connectionId}: WebSocket handshake failed", ex);
-            context.Response.StatusCode = 500;
-            context.Response.Close();
-            return;
-        }
-
-        WebSocket socket = wsContext.WebSocket;
-        string peer = context.Request.RemoteEndPoint?.ToString() ?? "unknown";
+        int connectionId = Interlocked.Increment(ref _nextConnectionId);
         ConsoleLog.Info($"Connection #{connectionId} opened from {peer}");
 
         var stats = new ConnectionStats();
@@ -115,7 +42,7 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
                 }
 
                 stats.MessageCount++;
-                ProcessMessage(message, connectionId, stats.MessageCount, runtimeLogs, stats);
+                ProcessMessage(message, connectionId, stats.MessageCount, stats);
             }
         }
         catch (OperationCanceledException)
@@ -183,7 +110,7 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
     }
 
     /// <summary>Decodes one binary message, writes it to the runtime logs, and updates connection stats.</summary>
-    private void ProcessMessage(byte[] message, int connectionId, int messageNumber, RuntimeLogs runtimeLogs, ConnectionStats stats)
+    private void ProcessMessage(byte[] message, int connectionId, int messageNumber, ConnectionStats stats)
     {
         int size = message.Length;
 

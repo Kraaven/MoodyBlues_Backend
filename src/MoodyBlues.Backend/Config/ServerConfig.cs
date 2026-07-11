@@ -16,6 +16,12 @@ public sealed class ServerConfig
     public string BinaryLogFilename { get; init; } = "binary.log";
     public string EventLogFilename { get; init; } = "events.log";
 
+    /// <summary>Postgres connection string for the Developers/Scenes metadata store.</summary>
+    public string DbConnectionString { get; init; } = "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues";
+
+    /// <summary>Directory uploaded scene .glb files are written to (one subfolder per developer).</summary>
+    public string ScenesDir { get; init; } = "scenes";
+
     public static ServerConfig FromEnvironment()
     {
         return new ServerConfig
@@ -26,6 +32,9 @@ public sealed class ServerConfig
             LogDir = Environment.GetEnvironmentVariable("MOODYBLUES_LOG_DIR") ?? "logs",
             BinaryLogFilename = Environment.GetEnvironmentVariable("MOODYBLUES_BINARY_LOG_FILENAME") ?? "binary.log",
             EventLogFilename = Environment.GetEnvironmentVariable("MOODYBLUES_EVENT_LOG_FILENAME") ?? "events.log",
+            DbConnectionString = Environment.GetEnvironmentVariable("MOODYBLUES_DB_CONNECTION")
+                ?? "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues",
+            ScenesDir = Environment.GetEnvironmentVariable("MOODYBLUES_SCENES_DIR") ?? "scenes",
         };
     }
 

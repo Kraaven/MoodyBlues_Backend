@@ -11,4 +11,9 @@ out/
 logs/
 *.log
 
+scenes/
+
 .env
+
+.dev-db.pid
+.dev-server.pid
