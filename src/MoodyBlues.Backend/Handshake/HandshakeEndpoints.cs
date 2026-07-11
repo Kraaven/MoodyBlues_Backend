@@ -49,9 +49,12 @@ public static class HandshakeEndpoints
         // connection belongs to -- the binary event wire protocol itself carries no such context.
         sessions.Put(request.SessionId, request.DeveloperId, request.SceneId);
 
-        string webSocketUrl = $"ws://{config.PublicHost}:{config.Port}/stream?session={Uri.EscapeDataString(request.SessionId)}";
+        string hostAndPort = PublicHostAndPort(config);
+        bool isHttps = string.Equals(config.PublicScheme, "https", StringComparison.OrdinalIgnoreCase);
+
+        string webSocketUrl = $"{(isHttps ? "wss" : "ws")}://{hostAndPort}/stream?session={Uri.EscapeDataString(request.SessionId)}";
         string? sceneUploadUrl = sceneUploadRequired
-            ? $"http://{config.PublicHost}:{config.Port}/scenes/{Uri.EscapeDataString(request.SceneId)}" +
+            ? $"{(isHttps ? "https" : "http")}://{hostAndPort}/scenes/{Uri.EscapeDataString(request.SceneId)}" +
               $"?developerId={Uri.EscapeDataString(request.DeveloperId)}&sceneHash={Uri.EscapeDataString(request.SceneHash)}"
             : null;
 
@@ -60,6 +63,19 @@ public static class HandshakeEndpoints
             $"sceneUploadRequired={sceneUploadRequired}");
 
         return Results.Ok(new HandshakeResponse(webSocketUrl, sceneUploadRequired, sceneUploadUrl));
+    }
+
+    /// <summary>
+    /// <c>PublicHost</c>, plus <c>:PublicPort</c> unless that port is the scheme's implicit
+    /// default (443 for https, 80 for http) -- e.g. behind Caddy on 443 this omits the port
+    /// entirely, matching how browsers/clients render default-port URLs.
+    /// </summary>
+    private static string PublicHostAndPort(ServerConfig config)
+    {
+        int port = config.PublicPort ?? config.Port;
+        bool isHttps = string.Equals(config.PublicScheme, "https", StringComparison.OrdinalIgnoreCase);
+        bool isDefaultPort = isHttps ? port == 443 : port == 80;
+        return isDefaultPort ? config.PublicHost : $"{config.PublicHost}:{port}";
     }
 
     /// <summary>Auto-provisions a Developer row on first sight -- there is no registration/auth endpoint yet.</summary>

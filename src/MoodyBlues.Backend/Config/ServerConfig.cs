@@ -19,6 +19,22 @@ public sealed class ServerConfig
     /// </summary>
     public string PublicHost { get; init; } = "localhost";
 
+    /// <summary>
+    /// Scheme clients should use to reach <see cref="PublicHost"/> ("http" or "https"). Controls
+    /// whether <c>webSocketUrl</c> comes back as <c>ws://</c>/<c>wss://</c> and
+    /// <c>sceneUploadUrl</c> as <c>http://</c>/<c>https://</c> (see HandshakeEndpoints.cs). Set to
+    /// "https" once a TLS-terminating reverse proxy (e.g. Caddy, see docker-compose.yml) is
+    /// sitting in front of this server -- Kestrel itself never speaks TLS directly.
+    /// </summary>
+    public string PublicScheme { get; init; } = "http";
+
+    /// <summary>
+    /// Port handed back to clients in <c>webSocketUrl</c>/<c>sceneUploadUrl</c>. Defaults to
+    /// <see cref="Port"/> (the plain `dotnet run`/no-proxy case). Behind a reverse proxy this is
+    /// typically 443, which differs from the internal <see cref="Port"/> Kestrel actually binds.
+    /// </summary>
+    public int? PublicPort { get; init; }
+
     // Runtime log files (see Logging/RuntimeLogs.cs): binary.log tracks raw
     // packet reception, events.log tracks every decoded event.
     public string LogDir { get; init; } = "logs";
@@ -40,6 +56,8 @@ public sealed class ServerConfig
             PublicHost = Environment.GetEnvironmentVariable("MOODYBLUES_PUBLIC_HOST")
                 ?? Environment.GetEnvironmentVariable("MOODYBLUES_HOST")
                 ?? "localhost",
+            PublicScheme = Environment.GetEnvironmentVariable("MOODYBLUES_PUBLIC_SCHEME") ?? "http",
+            PublicPort = TryParseNullableInt(Environment.GetEnvironmentVariable("MOODYBLUES_PUBLIC_PORT")),
             LogRawBytes = !IsFalsey(Environment.GetEnvironmentVariable("MOODYBLUES_LOG_RAW_BYTES")),
             LogDir = Environment.GetEnvironmentVariable("MOODYBLUES_LOG_DIR") ?? "logs",
             BinaryLogFilename = Environment.GetEnvironmentVariable("MOODYBLUES_BINARY_LOG_FILENAME") ?? "binary.log",
@@ -52,6 +70,9 @@ public sealed class ServerConfig
 
     private static int TryParseInt(string? value, int fallback) =>
         int.TryParse(value, out int parsed) ? parsed : fallback;
+
+    private static int? TryParseNullableInt(string? value) =>
+        int.TryParse(value, out int parsed) ? parsed : null;
 
     private static bool IsFalsey(string? value) =>
         value is "0" or "false" or "False";
