@@ -25,17 +25,18 @@ services:
       db:
         condition: service_healthy
     environment:
-      # Bind all interfaces inside the container; only the caddy service below actually reaches
-      # this port from outside the container -- it is deliberately NOT published to the host, so
-      # the only way in from the public internet is through Caddy's TLS.
+      # Bind all interfaces inside the container; this port is never published to the host (see
+      # `networks` below) -- the only way in from the public internet is through the
+      # already-running Nginx Proxy Manager (see README.md's "HTTPS/TLS"), which reaches this
+      # container over the shared `proxy` Docker network instead.
       MOODYBLUES_HOST: "0.0.0.0"
       # The hostname clients can actually reach this box on -- handed back in
       # webSocketUrl/sceneUploadUrl by POST /handshake. Set this in a .env file next to this
       # compose file (MOODYBLUES_PUBLIC_HOST=<domain-name>). Must be a real DNS name (behind
       # Cloudflare's proxy is fine -- see README.md's "HTTPS/TLS"), NOT a bare IP or 0.0.0.0.
       MOODYBLUES_PUBLIC_HOST: "${MOODYBLUES_PUBLIC_HOST:?Set MOODYBLUES_PUBLIC_HOST in a .env file to the server's public domain name}"
-      # Clients are told to use https/wss on port 443 (Caddy), not the internal http/8765 Kestrel
-      # actually binds above.
+      # Clients are told to use https/wss on port 443 (Nginx Proxy Manager), not the internal
+      # http/8765 Kestrel actually binds above.
       MOODYBLUES_PUBLIC_SCHEME: "https"
       MOODYBLUES_PUBLIC_PORT: "443"
       MOODYBLUES_PORT: "8765"
@@ -43,26 +44,17 @@ services:
     volumes:
       - moodyblues-logs:/app/logs
       - moodyblues-scenes:/app/scenes
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - backend
-    environment:
-      MOODYBLUES_PUBLIC_HOST: "${MOODYBLUES_PUBLIC_HOST:?Set MOODYBLUES_PUBLIC_HOST in a .env file to the server's public domain name}"
-    ports:
-      - "80:80" # Cloudflare still connects on 80 for some requests/checks; Caddy redirects to 443
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./certs:/etc/caddy/certs:ro # Cloudflare Origin Certificate -- see README.md's "HTTPS/TLS"
-      - moodyblues-caddy-data:/data
-      - moodyblues-caddy-config:/config
+    networks:
+      default: {} # talks to the `db` service above
+      proxy:
+        aliases:
+          - moodyblues-backend # what to enter as the Forward Hostname/IP in NPM's proxy host
 
 volumes:
   moodyblues-db-data:
   moodyblues-logs:
   moodyblues-scenes:
-  moodyblues-caddy-data:
-  moodyblues-caddy-config:
+
+networks:
+  proxy:
+    external: true # the network the already-running Nginx Proxy Manager container is on

@@ -23,10 +23,10 @@ dotnet test
 
 ## Running the server (Docker, Linux)
 
-The whole stack (Postgres + backend + a Caddy TLS reverse proxy, see "HTTPS/TLS" below) is defined
-in `docker-compose.yml` and built from the `Dockerfile` in this repo. `deploy.sh` is a single
-self-contained script for standing it up on a fresh Linux box (or managing it on one you already
-deployed to):
+The whole stack (Postgres + backend) is defined in `docker-compose.yml` and built from the
+`Dockerfile` in this repo. `deploy.sh` is a single self-contained script for standing it up on a
+fresh Linux box (or managing it on one you already deployed to). See "HTTPS/TLS" below for how it
+plugs into a reverse proxy for TLS termination.
 
 ```bash
 curl -O https://raw.githubusercontent.com/Kraaven/MoodyBlues_Backend/main/deploy.sh
@@ -64,46 +64,45 @@ See "HTTPS/TLS" immediately below for what this needs to point at and why.
 ### HTTPS/TLS
 
 Unity's Player Settings reject plain HTTP/WS `UnityWebRequest`/`ClientWebSocket` connections by
-default (`Allow downloads over HTTP` = `Not Allowed`), so a Docker deployment needs to actually
-terminate TLS, not just bind Kestrel to a port. `docker-compose.yml` handles this with a `caddy`
-service sitting in front of the backend:
+default (`Allow downloads over HTTP` = `Not Allowed`), so a production deployment needs to actually
+terminate TLS, not just bind Kestrel to a port.
 
-- Caddy listens on `80`/`443` (the only ports the compose file publishes to the host) and
-  reverse-proxies everything -- including the `/stream` WebSocket upgrade -- to `backend:8765`
-  over the internal Docker network. The backend container itself is not reachable from outside
-  Docker at all.
-- The backend is told about this via `MOODYBLUES_PUBLIC_SCHEME=https` and
-  `MOODYBLUES_PUBLIC_PORT=443` (set in `docker-compose.yml`), so `POST /handshake` hands Unity back
-  `wss://`/`https://` URLs instead of `ws://`/`http://`.
+This backend does not run its own TLS/reverse-proxy container -- if the host already runs
+[Nginx Proxy Manager](https://nginxproxymanager.com/) (or similar) fronting other services, that
+should be the single place handling TLS for everything on the box, rather than each app fighting
+over port 80/443. Instead, `docker-compose.yml` joins the `backend` service to an **external**
+Docker network named `proxy` (created independently, e.g. by whatever set up NPM) under the alias
+`moodyblues-backend`, so NPM can reach it directly without it ever being published to the host or
+the public internet.
 
-`MOODYBLUES_PUBLIC_HOST` is assumed to sit behind Cloudflare's proxy ("orange cloud") like the rest
-of the domain's records, so Caddy uses a **Cloudflare Origin Certificate** instead of Let's
-Encrypt -- Let's Encrypt needs to reach this box directly to validate domain ownership, which a
-Cloudflare-proxied record doesn't allow (the edge answers on 80/443, not this server). The origin
-certificate is trusted by Cloudflare's edge, which is the only thing that ever connects to this
-box directly; visitors (Unity included) only ever see Cloudflare's own publicly-trusted edge
-certificate.
+- `MOODYBLUES_PUBLIC_SCHEME=https` and `MOODYBLUES_PUBLIC_PORT=443` (set in `docker-compose.yml`)
+  tell the backend to hand Unity back `wss://`/`https://` URLs from `POST /handshake` instead of
+  `ws://`/`http://`, matching what NPM actually serves to the internet.
+- If your setup doesn't have an existing reverse proxy on the host, adjust the `networks:` section
+  in `docker-compose.yml` accordingly (e.g. publish `8765` directly and run your own TLS proxy in
+  front of it instead).
 
-One-time setup:
+One-time setup (adjust names/network if your reverse proxy setup differs):
 
-1. In the Cloudflare dashboard, **SSL/TLS -> Overview**, set the encryption mode to
-   **Full (strict)**. (This makes Cloudflare require, and validate, a cert on the origin --
-   without this it'll happily talk plain HTTP to it instead.)
-2. **SSL/TLS -> Origin Server -> Create Certificate**. Defaults are fine (RSA 2048, 15-year
-   validity); list `MOODYBLUES_PUBLIC_HOST` (and/or `*.kraaven.net`) as a covered hostname.
-3. Cloudflare shows two PEM blocks: the certificate and the private key. Save them as
-   `certs/cloudflare-origin.pem` and `certs/cloudflare-origin.key` next to `docker-compose.yml` on
-   the server. **Do not commit these** -- `certs/` is already gitignored, since the key must stay
-   secret.
-4. Make sure the DNS record for `MOODYBLUES_PUBLIC_HOST` stays proxied (orange cloud) and points
-   at this server.
+1. `docker network create proxy` if that external network doesn't already exist (skip this if
+   your reverse proxy already created it, as ours does).
+2. Start the stack (`./deploy.sh start`/`reset`) so the `backend` container joins that network.
+3. In the NPM web UI, **Add Proxy Host**:
+   - Domain Names: `MOODYBLUES_PUBLIC_HOST` (e.g. `moodyblues.kraaven.net`)
+   - Scheme: `http`, Forward Hostname/IP: `moodyblues-backend`, Forward Port: `8765`
+   - **Websockets Support: enabled** (required -- `/stream` is a WebSocket endpoint)
+   - SSL tab: request a new Let's Encrypt certificate, enable **Force SSL**. This works even
+     though the domain is Cloudflare-proxied -- NPM already does exactly this for the other
+     domains on this box.
+4. Make sure the DNS record for `MOODYBLUES_PUBLIC_HOST` points at this server (proxied through
+   Cloudflare is fine, same as the rest of `*.kraaven.net`).
 
 On the Unity side, `Assets/Resources/BluesClientConfig.asset`'s `backendBaseUrl` must match --
 `https://your-domain.example.com` (no `:443`, it's the default port).
 
-For local development (`dotnet run`, no Docker/Caddy), none of this applies: the server still
-defaults to plain `http://localhost:8765`, which the Unity Editor (unlike Player builds) never
-blocks regardless of the `Allow downloads over HTTP` setting.
+For local development (`dotnet run`, no Docker/reverse proxy), none of this applies: the server
+still defaults to plain `http://localhost:8765`, which the Unity Editor (unlike Player builds)
+never blocks regardless of the `Allow downloads over HTTP` setting.
 
 ### Running locally without Docker
 
@@ -224,8 +223,8 @@ tests/MoodyBlues.Backend.Tests/
   HandshakeEndpointsTests.cs     Tests for POST /handshake (EF Core InMemory + fake HttpContext)
   SceneUploadEndpointsTests.cs   Tests for POST /scenes/{sceneId}
 Dockerfile                      Multi-stage build for the backend image
-docker-compose.yml               Postgres + backend + Caddy (TLS reverse proxy) stack definition
-Caddyfile                        Caddy config: Cloudflare origin cert + reverse proxy to the backend
+docker-compose.yml               Postgres + backend stack definition (see "HTTPS/TLS" for how
+                                  it plugs into an existing reverse proxy)
 deploy.sh                        One-file clone/build/start/stop/reset script for a Linux host
 ```
 
