@@ -24,12 +24,6 @@ set -euo pipefail
 REPO_URL="https://github.com/Kraaven/MoodyBlues_Backend.git"
 REPO_DIR="${MOODYBLUES_REPO_DIR:-MoodyBlues_Backend}"
 
-# Node.js/@gltf-transform/cli/toktx pre-installed on top of the ASP.NET runtime image (see
-# docker/tools.Dockerfile) -- the backend's Dockerfile FROMs this tag rather than installing those
-# tools itself, so that slow apt/npm layer is only rebuilt when this tag changes, not on every
-# app-code deploy. Bump this (and docker/tools.Dockerfile) together when the tools need updating.
-TOOLS_IMAGE="moodyblues-backend-tools:1"
-
 resolve_repo_root() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,20 +46,7 @@ compose() {
     (cd "$REPO_ROOT" && docker compose "$@")
 }
 
-# Builds $TOOLS_IMAGE from docker/tools.Dockerfile if it isn't already sitting in the local image
-# store -- skipped entirely on every deploy after the first, since that tag never changes just
-# because app code did. Delete the image (or bump TOOLS_IMAGE above) to force a rebuild, e.g. after
-# editing docker/tools.Dockerfile.
-ensure_tools_image() {
-    if docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
-        return
-    fi
-    echo "Building tools base image ($TOOLS_IMAGE) -- one-time cost, several minutes..."
-    docker build -t "$TOOLS_IMAGE" -f "$REPO_ROOT/docker/tools.Dockerfile" "$REPO_ROOT"
-}
-
 cmd_start() {
-    ensure_tools_image
     echo "Building and starting the stack..."
     compose up -d --build
     compose ps
@@ -81,7 +62,6 @@ cmd_reset() {
     compose down
     echo "Pulling latest changes..."
     (cd "$REPO_ROOT" && git fetch origin && git pull --ff-only)
-    ensure_tools_image
     echo "Rebuilding and starting the stack..."
     compose up -d --build
     compose ps

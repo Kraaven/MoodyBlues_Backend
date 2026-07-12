@@ -54,13 +54,12 @@ looks for a checkout next to itself, or in `./MoodyBlues_Backend`, before clonin
 `ServerConfig` connection string already expects, and Postgres data / uploaded scenes / logs all
 live in Docker named volumes, so `reset`/`restart` never lose data.
 
-The backend image's `Dockerfile` builds `FROM` a separate, pre-built `moodyblues-backend-tools`
-image (see `docker/tools.Dockerfile`) instead of installing Node.js/`gltf-transform`/`toktx`
-itself. `deploy.sh` builds that image once, the first time you run `start` or `reset`, and reuses
-it forever after (it's a slow apt/npm layer that almost never needs to change) -- so only the first
-deploy pays that multi-minute cost; every deploy after that only rebuilds the fast app-code layers.
-If you edit `docker/tools.Dockerfile`, bump the tag in `deploy.sh`'s `TOOLS_IMAGE` so it gets
-rebuilt instead of reusing the stale image already on disk.
+The `Dockerfile`'s Node.js/`gltf-transform`/`toktx` install step (see "Scene optimization
+pipeline" below) is slow -- several minutes on a cold cache -- but Docker caches that layer across
+builds as long as its `RUN` instruction's text and base image don't change, so day-to-day `reset`s
+after the first successful build stay fast. Only bump/edit that block (e.g. for a KTX-Software
+version update) when you actually need to; expect the next build after such an edit to pay the
+multi-minute cost again.
 
 Database migrations are applied automatically on startup (`db.Database.MigrateAsync()` in
 `Program.cs`), so no separate migration step is needed.
@@ -194,9 +193,8 @@ Every uploaded `.glb` is also queued for a background optimization pass (see
 `Scenes/Processing/SceneProcessingWorker.cs`): it shells out to
 [`gltf-transform optimize`](https://gltf-transform.dev/cli) to dedupe/prune unused data,
 Draco-compress geometry, and convert textures to KTX2/Basis Universal (via KTX-Software's `toktx`,
-also required on `PATH` -- both are installed in the `moodyblues-backend-tools` base image, see
-`docker/tools.Dockerfile`). This matches the `DRACOLoader`/`KTX2Loader` the frontend's GLB viewer
-already has wired up.
+also required on `PATH` -- both are installed in the Docker image). This matches the
+`DRACOLoader`/`KTX2Loader` the frontend's GLB viewer already has wired up.
 
 This never blocks the Unity-facing upload response or dashboard viewing -- `POST /scenes/{sceneId}`
 returns as soon as the raw bytes are on disk, and `GET /api/scenes/{developerId}/{sceneId}/file`
@@ -323,8 +321,7 @@ tests/MoodyBlues.Backend.Tests/
   AuthEndpointsTests.cs          Tests for /auth/register, /auth/login
   ProjectEndpointsTests.cs       Tests for /api/projects
   SceneEndpointsTests.cs         Tests for /api/scenes/{developerId}/{sceneId} rename + file download
-Dockerfile                      Multi-stage build for the backend image (FROMs moodyblues-backend-tools)
-docker/tools.Dockerfile          Node.js/@gltf-transform/cli/toktx base image, built separately/rarely
+Dockerfile                      Multi-stage build for the backend image
 docker-compose.yml               Postgres + backend stack definition (see "HTTPS/TLS" for how
                                   it plugs into an existing reverse proxy)
 deploy.sh                        One-file clone/build/start/stop/reset script for a Linux host
