@@ -44,8 +44,9 @@ services:
       # Signs dashboard JWTs -- set a real random secret (32+ bytes) in the .env file next to this
       # compose file. Do NOT ship the insecure code default to production.
       MOODYBLUES_JWT_SECRET: "${MOODYBLUES_JWT_SECRET:?Set MOODYBLUES_JWT_SECRET in a .env file to a random secret}"
-      # Origin the deployed dashboard SPA is served from (e.g. https://dashboard.example.com).
-      MOODYBLUES_CORS_ORIGIN: "${MOODYBLUES_CORS_ORIGIN:?Set MOODYBLUES_CORS_ORIGIN in a .env file to the dashboard's origin}"
+      # Comma-separated origin(s) the deployed dashboard SPA is served from (e.g.
+      # https://your-app.vercel.app,http://localhost:5173).
+      MOODYBLUES_CORS_ORIGIN: "${MOODYBLUES_CORS_ORIGIN:?Set MOODYBLUES_CORS_ORIGIN in a .env file to the dashboard's origin(s)}"
     volumes:
       - moodyblues-logs:/app/logs
       - moodyblues-scenes:/app/scenes

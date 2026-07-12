@@ -35,7 +35,7 @@ builder.Services.AddRequestDecompression();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("dashboard", policy => policy
-        .WithOrigins(config.CorsOrigin)
+        .WithOrigins(config.CorsOrigins)
         .AllowAnyHeader()
         .AllowAnyMethod());
 });

@@ -62,7 +62,7 @@ Before starting the stack, create a `.env` file next to `docker-compose.yml` wit
 ```
 MOODYBLUES_PUBLIC_HOST=your-domain.example.com
 MOODYBLUES_JWT_SECRET=<a long random secret, e.g. `openssl rand -base64 48`>
-MOODYBLUES_CORS_ORIGIN=https://your-dashboard-domain.example.com
+MOODYBLUES_CORS_ORIGIN=https://your-app.vercel.app,http://localhost:5173
 ```
 
 See "HTTPS/TLS" immediately below for what this needs to point at and why.
@@ -140,7 +140,7 @@ Configuration is via environment variables (all optional):
 | `MOODYBLUES_DB_CONNECTION` | `Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues` | Postgres connection string (Developers/Scenes metadata) |
 | `MOODYBLUES_SCENES_DIR` | `scenes` | Directory uploaded `.glb` files are written to (one subfolder per developer) |
 | `MOODYBLUES_JWT_SECRET` | insecure dev-only placeholder | Symmetric secret signing dashboard JWTs -- **must** be set to a real random secret (32+ bytes) in production; the server logs a startup warning if it's still the default |
-| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Origin the dashboard SPA is served from, allowed via CORS |
+| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated origin(s) the dashboard SPA is served from, allowed via CORS (e.g. `https://your-app.vercel.app,http://localhost:5173`) |
 
 ### Runtime logs
 

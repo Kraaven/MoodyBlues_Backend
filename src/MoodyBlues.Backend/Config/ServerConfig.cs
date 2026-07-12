@@ -54,8 +54,12 @@ public sealed class ServerConfig
     /// </summary>
     public string JwtSecret { get; init; } = "insecure-dev-only-jwt-secret-change-me-1234567890";
 
-    /// <summary>Origin the dashboard SPA is served from during local development, allowed via CORS.</summary>
-    public string CorsOrigin { get; init; } = "http://localhost:5173";
+    /// <summary>
+    /// Origins the dashboard SPA is served from, allowed via CORS. Comma-separated so both a local
+    /// dev origin and a deployed one (e.g. a Vercel domain) can be allowed at the same time --
+    /// see <c>MOODYBLUES_CORS_ORIGIN</c> below.
+    /// </summary>
+    public string[] CorsOrigins { get; init; } = ["http://localhost:5173"];
 
     public static ServerConfig FromEnvironment()
     {
@@ -76,9 +80,14 @@ public sealed class ServerConfig
                 ?? "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues",
             ScenesDir = Environment.GetEnvironmentVariable("MOODYBLUES_SCENES_DIR") ?? "scenes",
             JwtSecret = Environment.GetEnvironmentVariable("MOODYBLUES_JWT_SECRET") ?? "insecure-dev-only-jwt-secret-change-me-1234567890",
-            CorsOrigin = Environment.GetEnvironmentVariable("MOODYBLUES_CORS_ORIGIN") ?? "http://localhost:5173",
+            CorsOrigins = ParseCorsOrigins(Environment.GetEnvironmentVariable("MOODYBLUES_CORS_ORIGIN")),
         };
     }
+
+    private static string[] ParseCorsOrigins(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? ["http://localhost:5173"]
+            : value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
     private static int TryParseInt(string? value, int fallback) =>
         int.TryParse(value, out int parsed) ? parsed : fallback;
