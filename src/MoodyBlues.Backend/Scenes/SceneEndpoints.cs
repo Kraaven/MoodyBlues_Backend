@@ -82,7 +82,13 @@ public static class SceneEndpoints
             return Results.NotFound("Scene file is not on disk.");
         }
 
-        return Results.File(fullPath, contentType: "model/gltf-binary", fileDownloadName: $"{scene.SceneId}.glb", enableRangeProcessing: true);
+        // Results.File(string) treats a relative path as "virtual" and resolves it against
+        // IWebHostEnvironment.WebRootFileProvider (i.e. a wwwroot/ folder, which this API doesn't have)
+        // instead of the process's working directory -- so with ScenesDir left relative (the default,
+        // "scenes"), this always 500ed with FileNotFoundException even though File.Exists() above (which
+        // *does* resolve relative to the working directory) found it just fine. Passing an absolute path
+        // makes Results.File use the direct-disk PhysicalFileHttpResult instead.
+        return Results.File(Path.GetFullPath(fullPath), contentType: "model/gltf-binary", fileDownloadName: $"{scene.SceneId}.glb", enableRangeProcessing: true);
     }
 
     private static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(

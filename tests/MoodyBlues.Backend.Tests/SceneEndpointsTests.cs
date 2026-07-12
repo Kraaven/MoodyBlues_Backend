@@ -189,6 +189,56 @@ public class SceneEndpointsTests : IDisposable
         Assert.DoesNotContain("optimized", file.FileDownloadName);
     }
 
+    [Fact]
+    public async Task Download_RelativeScenesDir_ReturnsFile()
+    {
+        // Regression test: production leaves ScenesDir at its relative default ("scenes"), unlike the
+        // other tests above which use an absolute temp dir. Results.File(string) resolves a relative
+        // path as "virtual" (against wwwroot, which doesn't exist here) instead of reading straight off
+        // disk, so DownloadAsync must resolve to an absolute path itself -- this pins that behavior.
+        string relativeScenesDir = "scenes-" + Guid.NewGuid();
+        string absoluteScenesDir = Path.Combine(Directory.GetCurrentDirectory(), relativeScenesDir);
+        try
+        {
+            byte[] fakeGlb = [0x67, 0x6C, 0x54, 0x46];
+            var db = TestDbContextFactory.Create();
+            Guid userId = Guid.NewGuid();
+            var createResult = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Viewer Project"), TestPrincipal.For(userId), db);
+            var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(createResult);
+            string developerId = created!.DeveloperId;
+
+            string relativePath = Path.Combine(developerId, "scene-1.glb");
+            db.Scenes.Add(new Scene
+            {
+                DeveloperId = developerId,
+                SceneId = "scene-1",
+                Hash = "hash-1",
+                RawGlbPath = relativePath,
+                UpdatedAtUtc = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+
+            string fullPath = Path.Combine(absoluteScenesDir, relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            await File.WriteAllBytesAsync(fullPath, fakeGlb);
+
+            var config = new ServerConfig { ScenesDir = relativeScenesDir };
+
+            var result = await SceneEndpoints.DownloadAsync(developerId, "scene-1", TestPrincipal.For(userId), db, config);
+            var file = Assert.IsType<Microsoft.AspNetCore.Http.HttpResults.PhysicalFileHttpResult>(result);
+
+            Assert.True(Path.IsPathRooted(file.FileName));
+            Assert.True(File.Exists(file.FileName));
+        }
+        finally
+        {
+            if (Directory.Exists(absoluteScenesDir))
+            {
+                Directory.Delete(absoluteScenesDir, recursive: true);
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_scenesDir))
