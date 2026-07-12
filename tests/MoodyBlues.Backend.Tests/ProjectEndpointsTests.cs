@@ -74,6 +74,7 @@ public class ProjectEndpointsTests
             SceneId = "scene-1",
             Hash = "hash",
             RawGlbPath = $"{created.DeveloperId}/scene-1.glb",
+            RawSizeBytes = 2048,
             DisplayName = "Renamed Scene",
             UpdatedAtUtc = DateTime.UtcNow,
         });
@@ -86,6 +87,8 @@ public class ProjectEndpointsTests
         Assert.Single(detail!.Scenes);
         Assert.Equal("scene-1", detail.Scenes[0].SceneId);
         Assert.Equal("Renamed Scene", detail.Scenes[0].DisplayName);
+        Assert.Equal(2048, detail.Scenes[0].SizeBytes);
+        Assert.Equal(SceneProcessingStatus.Pending, detail.Scenes[0].ProcessingStatus);
     }
 
     [Fact]

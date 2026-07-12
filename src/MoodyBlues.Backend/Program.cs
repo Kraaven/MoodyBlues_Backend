@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -32,6 +33,10 @@ builder.Services.AddSingleton<MoodyBluesServer>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
+
+// Serialize enums (e.g. Scene.ProcessingStatus) as their string names rather than raw integers --
+// friendlier for the dashboard SPA to consume without a lookup table.
+builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddSingleton<SceneProcessingQueue>();
 builder.Services.AddSingleton<IGltfOptimizer, GltfTransformOptimizer>();

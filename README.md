@@ -252,12 +252,15 @@ that's needed to start uploading scenes into this project.
 ### `GET /api/projects/{id}`
 
 Project detail plus its scenes (joined by `developerId`):
-`{ "id", "name", "developerId", "createdAtUtc", "scenes": [{ "sceneId", "displayName", "updatedAtUtc" }] }`.
+`{ "id", "name", "developerId", "createdAtUtc", "scenes": [{ "sceneId", "displayName", "updatedAtUtc", "sizeBytes", "processingStatus" }] }`.
+`sizeBytes` is the size of whichever file is currently servable (optimized once ready, otherwise the
+raw upload -- see `Scene.ServableSizeBytes`); `processingStatus` is one of `Pending`/`Processing`/`Ready`/`Failed`.
 
 ### `PATCH /api/scenes/{developerId}/{sceneId}`
 
 Body `{ "displayName": "Living Room v2" }` (or `null`/blank to clear it). Dashboard-only rename --
-`sceneId` (what Unity/the wire protocol use) is never changed.
+`sceneId` (what Unity/the wire protocol use) is never changed. Response shape matches a single scene
+from the list above (`sceneId, displayName, updatedAtUtc, sizeBytes, processingStatus`).
 
 ### `GET /api/scenes/{developerId}/{sceneId}/file`
 

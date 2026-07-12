@@ -45,7 +45,7 @@ public static class SceneEndpoints
         scene!.DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName;
         await db.SaveChangesAsync();
 
-        return Results.Ok(new SceneResponse(scene.SceneId, scene.DisplayName, scene.UpdatedAtUtc));
+        return Results.Ok(new SceneResponse(scene.SceneId, scene.DisplayName, scene.UpdatedAtUtc, scene.ServableSizeBytes, scene.ProcessingStatus));
     }
 
     /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>

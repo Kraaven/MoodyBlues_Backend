@@ -105,7 +105,7 @@ public static class ProjectEndpoints
             .ToListAsync();
 
         var sceneResponses = scenes
-            .Select(s => new ProjectSceneResponse(s.SceneId, s.DisplayName, s.UpdatedAtUtc))
+            .Select(s => new ProjectSceneResponse(s.SceneId, s.DisplayName, s.UpdatedAtUtc, s.ServableSizeBytes, s.ProcessingStatus))
             .ToList();
 
         return Results.Ok(new ProjectDetailResponse(project.Id, project.Name, project.DeveloperId, project.CreatedAtUtc, sceneResponses));

@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace MoodyBlues.Backend.Data;
 
 /// <summary>Status of the background optimization pass over a scene's raw upload (see <c>Scenes/Processing</c>).</summary>
@@ -50,4 +52,15 @@ public sealed class Scene
     /// in which case the frontend falls back to showing <see cref="SceneId"/>.
     /// </summary>
     public string? DisplayName { get; set; }
+
+    /// <summary>
+    /// Size of whichever file is currently servable for this scene -- the optimized output once
+    /// <see cref="ProcessingStatus"/> is <see cref="SceneProcessingStatus.Ready"/>, otherwise the raw
+    /// upload. Mirrors the fallback used by <c>SceneEndpoints.DownloadAsync</c> for the file itself;
+    /// this is a DB-only approximation (no disk check) used purely for display purposes.
+    /// </summary>
+    [NotMapped]
+    public long ServableSizeBytes => ProcessingStatus == SceneProcessingStatus.Ready && OptimizedSizeBytes.HasValue
+        ? OptimizedSizeBytes.Value
+        : RawSizeBytes;
 }

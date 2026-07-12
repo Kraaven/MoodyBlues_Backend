@@ -66,6 +66,7 @@ public class SceneEndpointsTests : IDisposable
 
         Assert.NotNull(response);
         Assert.Equal("My Cool Scene", response!.DisplayName);
+        Assert.Equal(SceneProcessingStatus.Pending, response.ProcessingStatus);
 
         Scene? scene = await db.Scenes.FindAsync(developerId, "scene-1");
         Assert.Equal("My Cool Scene", scene!.DisplayName);
