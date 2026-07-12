@@ -1,5 +1,14 @@
 namespace MoodyBlues.Backend.Data;
 
+/// <summary>Status of the background optimization pass over a scene's raw upload (see <c>Scenes/Processing</c>).</summary>
+public enum SceneProcessingStatus
+{
+    Pending = 0,
+    Processing = 1,
+    Ready = 2,
+    Failed = 3,
+}
+
 /// <summary>
 /// Metadata for one developer's scene. Identity is the composite
 /// <c>(DeveloperId, SceneId)</c> so two developers can each own their own
@@ -17,8 +26,20 @@ public sealed class Scene
 
     public required string Hash { get; set; }
 
-    /// <summary>Path (relative to <see cref="Config.ServerConfig.ScenesDir"/>) of the last uploaded .glb.</summary>
-    public required string GlbPath { get; set; }
+    /// <summary>Path (relative to <see cref="Config.ServerConfig.ScenesDir"/>) of the raw, as-uploaded .glb -- always present and always servable, even before/if optimization hasn't finished.</summary>
+    public required string RawGlbPath { get; set; }
+
+    /// <summary>Size in bytes of the raw upload, captured for the "saved X%" stat once optimization completes.</summary>
+    public long RawSizeBytes { get; set; }
+
+    /// <summary>Status of the background Draco/KTX2 optimization pass (see <c>Scenes/Processing/SceneProcessingWorker</c>).</summary>
+    public SceneProcessingStatus ProcessingStatus { get; set; } = SceneProcessingStatus.Pending;
+
+    /// <summary>Path (relative to <see cref="Config.ServerConfig.ScenesDir"/>) of the optimized .glb, once <see cref="ProcessingStatus"/> is <see cref="SceneProcessingStatus.Ready"/>. Null until then.</summary>
+    public string? OptimizedGlbPath { get; set; }
+
+    /// <summary>Size in bytes of the optimized .glb, once available.</summary>
+    public long? OptimizedSizeBytes { get; set; }
 
     public DateTime UpdatedAtUtc { get; set; }
 

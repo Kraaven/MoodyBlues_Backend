@@ -15,6 +15,22 @@ FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
 COPY --from=build /app .
 
+# Scene post-processing (see Scenes/Processing/SceneProcessingWorker.cs) shells out to
+# `gltf-transform optimize`, which itself shells out to KTX-Software's `toktx` for KTX2 texture
+# compression -- neither ships with the .NET runtime image, so both are installed here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg xz-utils \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install --global @gltf-transform/cli \
+    && curl -fsSL -o /tmp/ktx-software.deb \
+       https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Linux-x86_64.deb \
+    && apt-get install -y --no-install-recommends /tmp/ktx-software.deb \
+    && rm -f /tmp/ktx-software.deb \
+    && apt-get purge -y gnupg xz-utils \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # logs/ and scenes/ are written relative to the working directory at runtime
 # (see ServerConfig.cs) -- docker-compose.yml mounts volumes over them.
 EXPOSE 8765

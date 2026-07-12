@@ -48,6 +48,14 @@ public sealed class ServerConfig
     public string ScenesDir { get; init; } = "scenes";
 
     /// <summary>
+    /// Executable used to run the post-upload optimization pass (Draco geometry + KTX2 texture
+    /// compression, see <c>Scenes/Processing/SceneProcessingWorker</c>). Defaults to the
+    /// <c>@gltf-transform/cli</c> binary name, installed globally via npm in the Docker image.
+    /// Overridable so local dev/tests can point at a stub without it needing to be on PATH.
+    /// </summary>
+    public string GltfTransformCommand { get; init; } = "gltf-transform";
+
+    /// <summary>
     /// Symmetric signing secret for the dashboard's JWTs (see <see cref="MoodyBlues.Backend.Auth.JwtTokenService"/>).
     /// The default is an insecure placeholder -- <c>Program.cs</c> logs a warning at startup if it's still in use,
     /// and production deployments must set <c>MOODYBLUES_JWT_SECRET</c> to a real random secret (at least 32 bytes).
@@ -79,6 +87,7 @@ public sealed class ServerConfig
             DbConnectionString = Environment.GetEnvironmentVariable("MOODYBLUES_DB_CONNECTION")
                 ?? "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues",
             ScenesDir = Environment.GetEnvironmentVariable("MOODYBLUES_SCENES_DIR") ?? "scenes",
+            GltfTransformCommand = Environment.GetEnvironmentVariable("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
             JwtSecret = Environment.GetEnvironmentVariable("MOODYBLUES_JWT_SECRET") ?? "insecure-dev-only-jwt-secret-change-me-1234567890",
             CorsOrigins = ParseCorsOrigins(Environment.GetEnvironmentVariable("MOODYBLUES_CORS_ORIGIN")),
         };

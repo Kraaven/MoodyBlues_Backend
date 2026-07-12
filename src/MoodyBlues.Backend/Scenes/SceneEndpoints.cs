@@ -7,6 +7,7 @@ using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Logging;
 
 namespace MoodyBlues.Backend.Scenes;
 
@@ -61,9 +62,23 @@ public static class SceneEndpoints
             return authError;
         }
 
-        string fullPath = Path.Combine(config.ScenesDir, scene!.GlbPath);
+        // Prefer the optimized (Draco/KTX2) output once the background pass has finished; fall back to
+        // the raw upload otherwise -- viewing a scene should never block on/fail because of optimization.
+        // Also falls back if the DB says "Ready" but the file isn't actually on disk (e.g. a volume
+        // wiped between passes) -- the raw upload is the one file that's always guaranteed to exist.
+        string? optimizedFullPath = scene!.ProcessingStatus == SceneProcessingStatus.Ready && scene.OptimizedGlbPath is not null
+            ? Path.Combine(config.ScenesDir, scene.OptimizedGlbPath)
+            : null;
+
+        string fullPath = optimizedFullPath is not null && File.Exists(optimizedFullPath)
+            ? optimizedFullPath
+            : Path.Combine(config.ScenesDir, scene.RawGlbPath);
+
         if (!File.Exists(fullPath))
         {
+            ConsoleLog.Error(
+                $"Scene download: file missing on disk for developer={developerId} scene={sceneId} "
+                + $"status={scene.ProcessingStatus} expectedPath={fullPath}");
             return Results.NotFound("Scene file is not on disk.");
         }
 

@@ -73,7 +73,7 @@ public class ProjectEndpointsTests
             DeveloperId = created!.DeveloperId,
             SceneId = "scene-1",
             Hash = "hash",
-            GlbPath = $"{created.DeveloperId}/scene-1.glb",
+            RawGlbPath = $"{created.DeveloperId}/scene-1.glb",
             DisplayName = "Renamed Scene",
             UpdatedAtUtc = DateTime.UtcNow,
         });

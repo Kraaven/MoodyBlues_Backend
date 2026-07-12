@@ -42,7 +42,7 @@ public class HandshakeEndpointsTests
     public async Task ExistingScene_MatchingHash_DoesNotRequireUpload()
     {
         using var db = TestDbContextFactory.Create();
-        db.Scenes.Add(new Scene { DeveloperId = "dev-1", SceneId = "scene-1", Hash = "hash-abc", GlbPath = "dev-1/scene-1.glb", UpdatedAtUtc = DateTime.UtcNow });
+        db.Scenes.Add(new Scene { DeveloperId = "dev-1", SceneId = "scene-1", Hash = "hash-abc", RawGlbPath = "dev-1/scene-1.glb", UpdatedAtUtc = DateTime.UtcNow });
         await db.SaveChangesAsync();
         var sessions = new PendingSessionStore();
         var request = new HandshakeRequest("dev-1", "scene-1", "hash-abc", "session-2");
@@ -59,7 +59,7 @@ public class HandshakeEndpointsTests
     public async Task ExistingScene_MismatchedHash_RequiresUpload()
     {
         using var db = TestDbContextFactory.Create();
-        db.Scenes.Add(new Scene { DeveloperId = "dev-1", SceneId = "scene-1", Hash = "old-hash", GlbPath = "dev-1/scene-1.glb", UpdatedAtUtc = DateTime.UtcNow });
+        db.Scenes.Add(new Scene { DeveloperId = "dev-1", SceneId = "scene-1", Hash = "old-hash", RawGlbPath = "dev-1/scene-1.glb", UpdatedAtUtc = DateTime.UtcNow });
         await db.SaveChangesAsync();
         var sessions = new PendingSessionStore();
         var request = new HandshakeRequest("dev-1", "scene-1", "new-hash", "session-3");

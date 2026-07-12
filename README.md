@@ -139,6 +139,7 @@ Configuration is via environment variables (all optional):
 | `MOODYBLUES_LOG_DIR` | `logs` | Directory for the runtime log files below |
 | `MOODYBLUES_DB_CONNECTION` | `Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues` | Postgres connection string (Developers/Scenes metadata) |
 | `MOODYBLUES_SCENES_DIR` | `scenes` | Directory uploaded `.glb` files are written to (one subfolder per developer) |
+| `MOODYBLUES_GLTF_TRANSFORM_CMD` | `gltf-transform` | Executable used for the background Draco/KTX2 optimization pass (see "Scene optimization pipeline" above); overridable for local dev/tests that don't have it on `PATH` |
 | `MOODYBLUES_JWT_SECRET` | insecure dev-only placeholder | Symmetric secret signing dashboard JWTs -- **must** be set to a real random secret (32+ bytes) in production; the server logs a startup warning if it's still the default |
 | `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated origin(s) the dashboard SPA is served from, allowed via CORS (e.g. `https://your-app.vercel.app,http://localhost:5173`) |
 
@@ -179,6 +180,20 @@ are auto-provisioned on first sight (no registration/auth yet -- see `Data/Devel
 `sceneHash` is stored and compared as an opaque string; the backend does not independently
 recompute it from the uploaded scene file this milestone.
 
+### Scene optimization pipeline
+
+Every uploaded `.glb` is also queued for a background optimization pass (see
+`Scenes/Processing/SceneProcessingWorker.cs`): it shells out to
+[`gltf-transform optimize`](https://gltf-transform.dev/cli) to dedupe/prune unused data,
+Draco-compress geometry, and convert textures to KTX2/Basis Universal (via KTX-Software's `toktx`,
+also required on `PATH` -- both are installed in the Docker image). This matches the
+`DRACOLoader`/`KTX2Loader` the frontend's GLB viewer already has wired up.
+
+This never blocks the Unity-facing upload response or dashboard viewing -- `POST /scenes/{sceneId}`
+returns as soon as the raw bytes are on disk, and `GET /api/scenes/{developerId}/{sceneId}/file`
+serves the optimized output once it's ready, falling back to the raw upload otherwise (including if
+optimization fails or hasn't finished yet).
+
 The WebSocket connection that follows must include the same `sessionId` as a `?session=` query
 parameter -- it's a single-use token correlating the socket with the handshake that preceded it,
 since the binary event wire protocol itself carries no developer/scene context.
@@ -188,7 +203,8 @@ since the binary event wire protocol itself carries no developer/scene context.
 Raw `.glb` bytes in the request body (`Content-Type: model/gltf-binary`; gzip `Content-Encoding` is
 honored). The file is written as-is to `scenes/{developerId}/{sceneId}.glb` and
 `(developerId, sceneId)`'s stored hash is updated to `sceneHash`, so the next handshake sees it as
-up to date. No GLTF parsing happens server-side this milestone (see `Scenes/SceneUploadEndpoints.cs`)
+up to date. A background optimization pass is also queued (see "Scene optimization pipeline" below).
+No GLTF parsing happens synchronously in the request itself (see `Scenes/SceneUploadEndpoints.cs`)
 -- building a server-side object registry from the file's `node.extras.objectId` values is a later
 milestone.
 
@@ -272,6 +288,10 @@ src/MoodyBlues.Backend/
   Scenes/
     SceneUploadEndpoints.cs     POST /scenes/{sceneId} (Unity-facing, unauthenticated)
     SceneContracts.cs, SceneEndpoints.cs  /api/scenes/{developerId}/{sceneId} (dashboard-facing, authorized)
+    Processing/
+      SceneProcessingQueue.cs     In-memory job queue (upload -> background optimization)
+      SceneProcessingWorker.cs    BackgroundService that drains the queue, updates Scene rows
+      IGltfOptimizer.cs, GltfTransformOptimizer.cs  Runs `gltf-transform optimize` (Draco/KTX2)
   Logging/
     ConsoleLog.cs                Simple timestamped, colorized console logging
     RuntimeLogs.cs                binary.log / events.log file writers

@@ -4,6 +4,7 @@ using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Scenes.Processing;
 
 namespace MoodyBlues.Backend.Scenes;
 
@@ -11,10 +12,13 @@ namespace MoodyBlues.Backend.Scenes;
 /// <c>POST /scenes/{sceneId}</c> -- receives the exported <c>.glb</c> for a
 /// scene that <c>/handshake</c> flagged as out of date.
 ///
-/// This milestone does no GLTF parsing at all: the bytes are written to disk
-/// as-is ("processed later") and the scene's hash is updated so the *next*
-/// handshake sees it as up to date. Building a server-side object registry
-/// from the file's <c>node.extras.objectId</c> values is a later milestone.
+/// The raw bytes are written to disk as-is and the scene's hash is updated so the *next*
+/// handshake sees it as up to date -- this must stay fast and never block Unity's upload.
+/// A <see cref="SceneProcessingJob"/> is enqueued so a background worker
+/// (<see cref="SceneProcessingWorker"/>) can Draco/KTX2-optimize the file asynchronously; see
+/// <see cref="SceneEndpoints.DownloadAsync"/> for how the dashboard picks between the raw and
+/// optimized file. Building a server-side object registry from the file's
+/// <c>node.extras.objectId</c> values is a later milestone.
 /// </summary>
 public static class SceneUploadEndpoints
 {
@@ -28,7 +32,8 @@ public static class SceneUploadEndpoints
         string sceneId,
         HttpRequest request,
         MoodyBluesDbContext db,
-        ServerConfig config)
+        ServerConfig config,
+        SceneProcessingQueue processingQueue)
     {
         string? developerId = request.Query["developerId"];
         string? sceneHash = request.Query["sceneHash"];
@@ -56,14 +61,18 @@ public static class SceneUploadEndpoints
             bytesWritten = fileStream.Length;
         }
 
-        await UpsertSceneAsync(db, developerId, sceneId, sceneHash, relativePath);
+        await UpsertSceneAsync(db, developerId, sceneId, sceneHash, relativePath, bytesWritten);
+
+        // Fire-and-forget: the worker picks this up on its own background loop. Never block the
+        // Unity-facing upload response on optimization -- the raw file is already servable as-is.
+        processingQueue.Enqueue(developerId, sceneId);
 
         ConsoleLog.Info($"Scene upload: developer={developerId} scene={sceneId} bytes={bytesWritten} -> {fullPath}");
 
         return Results.Ok();
     }
 
-    private static async Task UpsertSceneAsync(MoodyBluesDbContext db, string developerId, string sceneId, string sceneHash, string relativePath)
+    private static async Task UpsertSceneAsync(MoodyBluesDbContext db, string developerId, string sceneId, string sceneHash, string relativePath, long rawSizeBytes)
     {
         Data.Scene? scene = await db.Scenes.FindAsync(developerId, sceneId);
         if (scene is null)
@@ -73,14 +82,22 @@ public static class SceneUploadEndpoints
                 DeveloperId = developerId,
                 SceneId = sceneId,
                 Hash = sceneHash,
-                GlbPath = relativePath,
+                RawGlbPath = relativePath,
+                RawSizeBytes = rawSizeBytes,
+                ProcessingStatus = SceneProcessingStatus.Pending,
+                OptimizedGlbPath = null,
+                OptimizedSizeBytes = null,
                 UpdatedAtUtc = DateTime.UtcNow,
             });
         }
         else
         {
             scene.Hash = sceneHash;
-            scene.GlbPath = relativePath;
+            scene.RawGlbPath = relativePath;
+            scene.RawSizeBytes = rawSizeBytes;
+            scene.ProcessingStatus = SceneProcessingStatus.Pending;
+            scene.OptimizedGlbPath = null;
+            scene.OptimizedSizeBytes = null;
             scene.UpdatedAtUtc = DateTime.UtcNow;
         }
 

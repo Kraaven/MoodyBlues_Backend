@@ -12,6 +12,7 @@ using MoodyBlues.Backend.Handshake;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Projects;
 using MoodyBlues.Backend.Scenes;
+using MoodyBlues.Backend.Scenes.Processing;
 using MoodyBlues.Backend.Server;
 
 var config = ServerConfig.FromEnvironment();
@@ -31,6 +32,10 @@ builder.Services.AddSingleton<MoodyBluesServer>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
+
+builder.Services.AddSingleton<SceneProcessingQueue>();
+builder.Services.AddSingleton<IGltfOptimizer, GltfTransformOptimizer>();
+builder.Services.AddHostedService<SceneProcessingWorker>();
 
 builder.Services.AddCors(options =>
 {
@@ -53,6 +58,7 @@ using (var migrationScope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
+app.UseGlobalExceptionHandling(config);
 app.UseCors("dashboard");
 app.UseRequestDecompression();
 app.UseWebSockets();
