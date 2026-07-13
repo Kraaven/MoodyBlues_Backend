@@ -36,6 +36,10 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
         startInfo.ArgumentList.Add("ktx2");
         startInfo.ArgumentList.Add("--texture-size");
         startInfo.ArgumentList.Add("2048");
+        startInfo.ArgumentList.Add("--flatten");
+        startInfo.ArgumentList.Add("false");
+        startInfo.ArgumentList.Add("--join");
+        startInfo.ArgumentList.Add("false");
 
         try
         {
