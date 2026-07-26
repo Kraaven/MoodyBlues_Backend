@@ -26,6 +26,7 @@ public static class SessionEndpoints
         var sessionGroup = app.MapGroup("/api/sessions/{sessionId}").RequireAuthorization();
         sessionGroup.MapGet("/", GetAsync);
         sessionGroup.MapGet("/animation", DownloadAnimationAsync);
+        sessionGroup.MapDelete("/", DeleteAsync);
     }
 
     /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
@@ -115,6 +116,34 @@ public static class SessionEndpoints
         // See SceneEndpoints.DownloadAsync for why this must be an absolute path (Results.File
         // otherwise resolves relative paths against a nonexistent wwwroot).
         return Results.File(Path.GetFullPath(fullPath), contentType: "application/json", fileDownloadName: $"{session.Id}.json");
+    }
+
+    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
+    public static async Task<IResult> DeleteAsync(
+        string sessionId,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db,
+        ServerConfig config)
+    {
+        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        if (session!.AnimationPath is not null)
+        {
+            string fullPath = Path.Combine(config.SessionsDir, session.AnimationPath);
+            if (File.Exists(fullPath))
+            {
+                File.Delete(fullPath);
+            }
+        }
+
+        db.Sessions.Remove(session);
+        await db.SaveChangesAsync();
+
+        return Results.NoContent();
     }
 
     private static async Task<(IResult? Error, Data.Session? Session)> CheckOwnershipAsync(

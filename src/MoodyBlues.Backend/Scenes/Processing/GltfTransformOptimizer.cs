@@ -40,6 +40,8 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
         startInfo.ArgumentList.Add("false");
         startInfo.ArgumentList.Add("--join");
         startInfo.ArgumentList.Add("false");
+        startInfo.ArgumentList.Add("--dedup");
+        startInfo.ArgumentList.Add("false");
 
         try
         {
