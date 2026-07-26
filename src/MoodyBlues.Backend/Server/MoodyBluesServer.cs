@@ -2,52 +2,67 @@ using System.Net.WebSockets;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Protocol;
+using MoodyBlues.Backend.Session;
 
 namespace MoodyBlues.Backend.Server;
 
 /// <summary>
-/// Decodes the Unity binary event stream for one already-accepted WebSocket
-/// connection at a time (see the <c>/stream</c> minimal API route in
-/// Program.cs, which does the HTTP-to-WebSocket upgrade and session-token
-/// validation before handing the socket off here).
-///
-/// For this milestone the server has no persistent object store yet -- it
-/// just decodes every event per Spec.md and logs everything in detail
-/// (console + the two runtime log files) so the wire protocol can be
-/// validated end-to-end against the real Unity client
-/// (<c>BluesStreamer.ConnectAsync</c>, which connects to us).
+/// Decodes the Unity binary event stream for one already-accepted WebSocket connection at a time
+/// (see the <c>/stream</c> minimal API route in Program.cs, which does the HTTP-to-WebSocket
+/// upgrade and session-token validation before handing the socket off here). Every decoded event
+/// is fed into a per-connection <see cref="SessionRecorder"/>; once the socket closes (cleanly,
+/// via inactivity timeout, or on error) <see cref="SessionFinalizer"/> builds, optimizes, and
+/// persists whatever was recorded as a <see cref="Data.Session"/>.
 /// </summary>
-public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLogs)
+public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLogs, SessionFinalizer sessionFinalizer)
 {
     private int _nextConnectionId;
 
-    /// <summary>Owns one WebSocket connection end-to-end: receive loop, decode, log, summary. Disposes <paramref name="socket"/>.</summary>
-    public async Task HandleConnectionAsync(WebSocket socket, string peer, CancellationToken cancellationToken)
+    /// <summary>Owns one WebSocket connection end-to-end: receive loop, decode, log, finalize. Disposes <paramref name="socket"/>.</summary>
+    public async Task HandleConnectionAsync(WebSocket socket, string peer, string developerId, string sceneId, CancellationToken cancellationToken)
     {
         int connectionId = Interlocked.Increment(ref _nextConnectionId);
-        ConsoleLog.Info($"Connection #{connectionId} opened from {peer}");
+        ConsoleLog.Info($"Connection #{connectionId} opened from {peer} (developer={developerId} scene={sceneId})");
 
         var stats = new ConnectionStats();
+        var recorder = new SessionRecorder();
         var receiveBuffer = new byte[8192];
         using var messageStream = new MemoryStream();
+
+        // Linked to the caller's token (app shutdown / HTTP request aborted) so either source can
+        // end the connection. CancelAfter is re-armed after every successfully decoded message --
+        // see the receive loop below -- so this only actually fires after config.StreamInactivityTimeout
+        // of true silence. A clean quit (Unity's BluesSessionManager.StopStreaming) closes the
+        // socket itself well before this could ever fire; this is purely the crash/dropped-connection
+        // safety net that guarantees a session still gets finalized.
+        using var inactivityCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        inactivityCts.CancelAfter(config.StreamInactivityTimeout);
+
+        bool timedOut = false;
 
         try
         {
             while (socket.State == WebSocketState.Open)
             {
-                byte[]? message = await ReceiveMessageAsync(socket, messageStream, receiveBuffer, connectionId, cancellationToken);
+                byte[]? message = await ReceiveMessageAsync(socket, messageStream, receiveBuffer, connectionId, inactivityCts.Token);
                 if (message is null)
                 {
                     break;
                 }
 
                 stats.MessageCount++;
-                ProcessMessage(message, connectionId, stats.MessageCount, stats);
+                ProcessMessage(message, connectionId, stats.MessageCount, stats, recorder);
+
+                // Reset the inactivity window -- this connection just proved it's still alive.
+                inactivityCts.CancelAfter(config.StreamInactivityTimeout);
             }
         }
         catch (OperationCanceledException)
         {
-            // shutting down
+            timedOut = !cancellationToken.IsCancellationRequested;
+            ConsoleLog.Info(timedOut
+                ? $"Connection #{connectionId}: closing after {config.StreamInactivityTimeout.TotalSeconds}s of inactivity"
+                : $"Connection #{connectionId}: shutting down");
         }
         catch (WebSocketException ex)
         {
@@ -60,7 +75,22 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         finally
         {
             ConsoleLog.Info($"Connection #{connectionId} summary: {stats.MessageCount} message(s), {stats.EventCount} event(s) -- breakdown: {{{stats.Breakdown()}}}");
+
+            if (socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseReceived)
+            {
+                try
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, timedOut ? "inactivity timeout" : "closing", CancellationToken.None);
+                }
+                catch
+                {
+                    // Best-effort -- the socket may already be unusable (e.g. peer vanished mid-close).
+                }
+            }
+
             socket.Dispose();
+
+            await sessionFinalizer.FinalizeAsync(developerId, sceneId, recorder.Finalize());
         }
     }
 
@@ -109,8 +139,8 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         }
     }
 
-    /// <summary>Decodes one binary message, writes it to the runtime logs, and updates connection stats.</summary>
-    private void ProcessMessage(byte[] message, int connectionId, int messageNumber, ConnectionStats stats)
+    /// <summary>Decodes one binary message, writes it to the runtime logs, feeds the session recorder, and updates connection stats.</summary>
+    private void ProcessMessage(byte[] message, int connectionId, int messageNumber, ConnectionStats stats, SessionRecorder recorder)
     {
         int size = message.Length;
 
@@ -141,6 +171,11 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         runtimeLogs.LogMessage(connectionId, messageNumber, size, decodedEvents);
         ConsoleLog.Info($"Connection #{connectionId}: message #{messageNumber} -> {size} bytes, {decodedEvents.Count} event(s)");
         stats.AddEvents(decodedEvents);
+
+        foreach (MoodyEvent evt in decodedEvents)
+        {
+            recorder.Record(evt);
+        }
     }
 
     /// <summary>Per-connection running totals, used only for the closing summary line.</summary>

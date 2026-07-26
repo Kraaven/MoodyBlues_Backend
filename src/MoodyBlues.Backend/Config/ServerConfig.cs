@@ -47,6 +47,17 @@ public sealed class ServerConfig
     /// <summary>Directory uploaded scene .glb files are written to (one subfolder per developer).</summary>
     public string ScenesDir { get; init; } = "scenes";
 
+    /// <summary>Directory finalized session animation files (.json.gz) are written to (one subfolder per developer).</summary>
+    public string SessionsDir { get; init; } = "sessions";
+
+    /// <summary>
+    /// How long a <c>/stream</c> WebSocket connection can go without a fully-decoded message
+    /// before the server closes it and finalizes whatever was recorded so far. A clean quit
+    /// (Unity's BluesSessionManager.StopStreaming) closes the socket immediately, so this only
+    /// matters as a safety net for crashes/dropped connections.
+    /// </summary>
+    public TimeSpan StreamInactivityTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// Executable used to run the post-upload optimization pass (Draco geometry + KTX2 texture
     /// compression, see <c>Scenes/Processing/SceneProcessingWorker</c>). Defaults to the
@@ -87,6 +98,8 @@ public sealed class ServerConfig
             DbConnectionString = Environment.GetEnvironmentVariable("MOODYBLUES_DB_CONNECTION")
                 ?? "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues",
             ScenesDir = Environment.GetEnvironmentVariable("MOODYBLUES_SCENES_DIR") ?? "scenes",
+            SessionsDir = Environment.GetEnvironmentVariable("MOODYBLUES_SESSIONS_DIR") ?? "sessions",
+            StreamInactivityTimeout = TimeSpan.FromSeconds(TryParseInt(Environment.GetEnvironmentVariable("MOODYBLUES_STREAM_INACTIVITY_TIMEOUT_SECONDS"), 10)),
             GltfTransformCommand = Environment.GetEnvironmentVariable("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
             JwtSecret = Environment.GetEnvironmentVariable("MOODYBLUES_JWT_SECRET") ?? "insecure-dev-only-jwt-secret-change-me-1234567890",
             CorsOrigins = ParseCorsOrigins(Environment.GetEnvironmentVariable("MOODYBLUES_CORS_ORIGIN")),

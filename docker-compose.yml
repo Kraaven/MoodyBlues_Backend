@@ -50,6 +50,7 @@ services:
     volumes:
       - moodyblues-logs:/app/logs
       - moodyblues-scenes:/app/scenes
+      - moodyblues-sessions:/app/sessions
     networks:
       default: {} # talks to the `db` service above
       proxy:
@@ -60,6 +61,7 @@ volumes:
   moodyblues-db-data:
   moodyblues-logs:
   moodyblues-scenes:
+  moodyblues-sessions:
 
 networks:
   proxy:

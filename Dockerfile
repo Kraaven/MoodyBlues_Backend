@@ -55,7 +55,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get purge -y xz-utils \
     && apt-get autoremove -y
 
-# logs/ and scenes/ are written relative to the working directory at runtime
+# logs/, scenes/, and sessions/ are written relative to the working directory at runtime
 # (see ServerConfig.cs) -- docker-compose.yml mounts volumes over them.
 EXPOSE 8765
 ENTRYPOINT ["dotnet", "MoodyBlues.Backend.dll"]

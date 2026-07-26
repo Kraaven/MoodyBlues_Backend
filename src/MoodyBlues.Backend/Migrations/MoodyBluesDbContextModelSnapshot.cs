@@ -104,6 +104,54 @@ namespace MoodyBlues.Backend.Migrations
                     b.ToTable("Scenes");
                 });
 
+            modelBuilder.Entity("MoodyBlues.Backend.Data.Session", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AnimationPath")
+                        .HasColumnType("text");
+
+                    b.Property<long>("AnimationSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DeveloperId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<double>("DurationSeconds")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasColumnType("text");
+
+                    b.Property<long>("KeyframeCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ObjectCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("RawEventCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SceneId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeveloperId", "SceneId");
+
+                    b.ToTable("Sessions");
+                });
+
             modelBuilder.Entity("MoodyBlues.Backend.Data.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -139,6 +187,15 @@ namespace MoodyBlues.Backend.Migrations
                 });
 
             modelBuilder.Entity("MoodyBlues.Backend.Data.Scene", b =>
+                {
+                    b.HasOne("MoodyBlues.Backend.Data.Developer", null)
+                        .WithMany()
+                        .HasForeignKey("DeveloperId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MoodyBlues.Backend.Data.Session", b =>
                 {
                     b.HasOne("MoodyBlues.Backend.Data.Developer", null)
                         .WithMany()

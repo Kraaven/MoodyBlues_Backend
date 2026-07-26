@@ -15,6 +15,8 @@ using MoodyBlues.Backend.Projects;
 using MoodyBlues.Backend.Scenes;
 using MoodyBlues.Backend.Scenes.Processing;
 using MoodyBlues.Backend.Server;
+using MoodyBlues.Backend.Session;
+using MoodyBlues.Backend.Sessions;
 
 var config = ServerConfig.FromEnvironment();
 
@@ -30,6 +32,7 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton(new RuntimeLogs(config.LogDir, config.BinaryLogFilename, config.EventLogFilename));
 builder.Services.AddSingleton<PendingSessionStore>();
 builder.Services.AddSingleton<MoodyBluesServer>();
+builder.Services.AddSingleton<SessionFinalizer>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
@@ -75,6 +78,7 @@ SceneUploadEndpoints.Map(app);
 AuthEndpoints.Map(app);
 ProjectEndpoints.Map(app);
 SceneEndpoints.Map(app);
+SessionEndpoints.Map(app);
 
 app.Map("/stream", async (HttpContext context, MoodyBluesServer server, PendingSessionStore sessions) =>
 {
@@ -97,7 +101,7 @@ app.Map("/stream", async (HttpContext context, MoodyBluesServer server, PendingS
         ? $"{ip}:{context.Connection.RemotePort}"
         : "unknown";
     ConsoleLog.Info($"/stream: session={sessionId} developer={pending!.DeveloperId} scene={pending.SceneId}");
-    await server.HandleConnectionAsync(socket, peer, context.RequestAborted);
+    await server.HandleConnectionAsync(socket, peer, pending.DeveloperId, pending.SceneId, context.RequestAborted);
 });
 
 var runtimeLogs = app.Services.GetRequiredService<RuntimeLogs>();

@@ -17,6 +17,8 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
 
     public DbSet<Project> Projects => Set<Project>();
 
+    public DbSet<Session> Sessions => Set<Session>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Developer>(entity =>
@@ -45,6 +47,21 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             entity.HasOne<User>()
                 .WithMany()
                 .HasForeignKey(p => p.UserId);
+        });
+
+        modelBuilder.Entity<Session>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.DeveloperId, s.SceneId });
+            // Deliberately no FK to Scene: BluesHandshakeClient attaches the streamer (starting
+            // this connection) and kicks off the scene upload concurrently, not sequentially --
+            // see BluesHandshakeClient.PerformHandshakeAndConnect on the Unity side -- so a
+            // session can finish streaming and finalize before the Scene row for a brand-new
+            // scene has been created. FK'ing to Developer only, which handshake provisions
+            // synchronously before /stream is ever reachable.
+            entity.HasOne<Developer>()
+                .WithMany()
+                .HasForeignKey(s => s.DeveloperId);
         });
     }
 }
