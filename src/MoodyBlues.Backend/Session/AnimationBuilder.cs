@@ -3,14 +3,17 @@ using MoodyBlues.Backend.Protocol;
 namespace MoodyBlues.Backend.Session;
 
 /// <summary>Un-optimized per-channel (time, value) samples for one tracked object, plus its lifecycle timeline.</summary>
-public sealed class RawObjectTimeline
-{
-    public required ushort ObjectId { get; init; }
+    public sealed class RawObjectTimeline
+    {
+        public required ushort ObjectId { get; init; }
 
-    /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
-    public ushort? TemplateObjectId { get; init; }
+        /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
+        public ushort? TemplateObjectId { get; init; }
 
-    public List<(double Time, float Value)> PosX { get; } = new();
+        /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
+        public ushort? ParentObjectId { get; init; }
+
+        public List<(double Time, float Value)> PosX { get; } = new();
     public List<(double Time, float Value)> PosY { get; } = new();
     public List<(double Time, float Value)> PosZ { get; } = new();
     public List<(double Time, float Value)> RotX { get; } = new();
@@ -35,16 +38,19 @@ public static class AnimationBuilder
     {
         var byObjectId = new Dictionary<ushort, RawObjectTimeline>();
 
-        foreach (ushort objectId in timeline.ObjectOrder)
-        {
-            byObjectId[objectId] = new RawObjectTimeline
+foreach (ushort objectId in timeline.ObjectOrder)
             {
-                ObjectId = objectId,
-                TemplateObjectId = timeline.TemplateObjectIdByObjectId.TryGetValue(objectId, out ushort templateId)
-                    ? templateId
-                    : null,
-            };
-        }
+                byObjectId[objectId] = new RawObjectTimeline
+                {
+                    ObjectId = objectId,
+                    TemplateObjectId = timeline.TemplateObjectIdByObjectId.TryGetValue(objectId, out ushort templateId)
+                        ? templateId
+                        : null,
+                    ParentObjectId = timeline.ParentObjectIdByObjectId.TryGetValue(objectId, out ushort parentId)
+                        ? parentId
+                        : null,
+                };
+            }
 
         foreach (TimelineSample sample in timeline.Samples)
         {

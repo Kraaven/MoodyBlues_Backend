@@ -47,8 +47,8 @@ public static class ProtocolConstants
         [EventType.DeltaRotationUniformScale] = 4,
         [EventType.ShowObject] = 0,
         [EventType.HideObject] = 0,
-        // TemplateObjectID(2) + Position(6) + Rotation(4) + Scale(6)
-        [EventType.InstantiateObject] = 18,
+        // TemplateObjectID(2) + ParentObjectId(2) + Position(6) + Rotation(4) + Scale(6)
+        [EventType.InstantiateObject] = 20,
         [EventType.DeleteObject] = 0,
     };
 

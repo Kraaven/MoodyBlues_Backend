@@ -22,6 +22,7 @@ public sealed record HideObjectEvent(ushort ObjectId) : MoodyEvent, IObjectEvent
 public sealed record InstantiateObjectEvent(
     ushort ObjectId,
     ushort TemplateObjectId,
+    ushort ParentObjectId,
     Vector3 Position,
     Quaternion Rotation,
     Vector3 Scale) : MoodyEvent, IObjectEvent;

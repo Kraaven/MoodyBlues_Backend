@@ -182,11 +182,13 @@ public class ProtocolParserTests
     public void InstantiateObject_Decode()
     {
         ushort templateId = 3;
+        ushort parentId = 0;
         var position = new Vector3(1.0f, 2.0f, 3.0f);
         var scale = new Vector3(1.0f, 1.0f, 1.0f);
 
         byte[] payload = Concat(
             BitConverter.GetBytes(templateId),
+            BitConverter.GetBytes(parentId),
             PackVector3_16(position, ProtocolConstants.RangePosition),
             PackQuatSmallestThree(Identity, ProtocolConstants.RangeQuatSmallestThree),
             PackVector3_16(scale, ProtocolConstants.RangeScaleTrue));
@@ -198,6 +200,7 @@ public class ProtocolParserTests
 
         Assert.Equal(500, evt.ObjectId);
         Assert.Equal(templateId, evt.TemplateObjectId);
+        Assert.Equal(parentId, evt.ParentObjectId);
         AssertVec3Close(position, evt.Position);
         AssertQuatClose(Identity, evt.Rotation, 0.005f);
         AssertVec3Close(scale, evt.Scale);

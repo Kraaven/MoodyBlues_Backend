@@ -56,7 +56,7 @@ public class SessionRecorderAndAnimationTests
         var rot = Quaternion.Identity;
         var scale = Vector3.One;
 
-        recorder.Record(new InstantiateObjectEvent(42, 7, pos, rot, scale));
+        recorder.Record(new InstantiateObjectEvent(42, 7, 0, pos, rot, scale));
 
         SessionTimeline timeline = recorder.Finalize();
 

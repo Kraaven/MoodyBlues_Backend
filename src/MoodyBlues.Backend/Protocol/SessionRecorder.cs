@@ -12,26 +12,28 @@ public enum LifecycleEventType
 }
 
 /// <summary>
-/// A fully-resolved object state at one point in time. Recorded whenever anything about an
-/// object changes -- deliberately a full snapshot (not just the changed property) even though
-/// most wire events only touch one or two properties, so <c>Session/AnimationBuilder.cs</c> can
-/// build every channel from the same sample list without having to track "last known value"
-/// itself.
-/// </summary>
-public sealed record TimelineSample(
-    double Time,
-    ushort ObjectId,
-    Vector3 Position,
-    Quaternion Rotation,
-    Vector3 Scale,
-    bool Visible,
-    LifecycleEventType? Lifecycle);
+    /// A fully-resolved object state at one point in time. Recorded whenever anything about an
+    /// object changes -- deliberately a full snapshot (not just the changed property) even though
+    /// most wire events only touch one or two properties, so <c>Session/AnimationBuilder.cs</c> can
+    /// build every channel from the same sample list without having to track "last known value"
+    /// itself.
+    /// </summary>
+    public sealed record TimelineSample(
+        double Time,
+        ushort ObjectId,
+        ushort? ParentObjectId,
+        Vector3 Position,
+        Quaternion Rotation,
+        Vector3 Scale,
+        bool Visible,
+        LifecycleEventType? Lifecycle);
 
 /// <summary>Everything <see cref="SessionRecorder"/> accumulated for one connection, once finalized.</summary>
 public sealed record SessionTimeline(
     IReadOnlyList<TimelineSample> Samples,
     IReadOnlyList<ushort> ObjectOrder,
     IReadOnlyDictionary<ushort, ushort> TemplateObjectIdByObjectId,
+    IReadOnlyDictionary<ushort, ushort> ParentObjectIdByObjectId,
     double DurationSeconds,
     long RawEventCount);
 
@@ -66,6 +68,7 @@ public sealed class SessionRecorder
 
     private readonly Dictionary<ushort, ObjectState> _states = new();
     private readonly Dictionary<ushort, ushort> _templateByObjectId = new();
+    private readonly Dictionary<ushort, ushort> _parentByObjectId = new();
     private readonly List<ushort> _objectOrder = new();
     private readonly HashSet<ushort> _seenObjects = new();
     private readonly List<TimelineSample> _samples = new();
@@ -109,8 +112,8 @@ public sealed class SessionRecorder
                 state.Position = inst.Position;
                 state.Rotation = inst.Rotation;
                 state.Scale = inst.Scale;
-                state.Visible = true;
                 _templateByObjectId[inst.ObjectId] = inst.TemplateObjectId;
+                _parentByObjectId[inst.ObjectId] = inst.ParentObjectId;
                 Emit(inst.ObjectId, LifecycleEventType.Spawn);
                 return;
             }
@@ -127,7 +130,7 @@ public sealed class SessionRecorder
 
     public SessionTimeline Finalize()
     {
-        return new SessionTimeline(_samples, _objectOrder, _templateByObjectId, _currentTime, RawEventCount);
+        return new SessionTimeline(_samples, _objectOrder, _templateByObjectId, _parentByObjectId, _currentTime, RawEventCount);
     }
 
     private ObjectState GetOrCreateState(ushort objectId)
@@ -146,13 +149,13 @@ public sealed class SessionRecorder
         return state;
     }
 
-    private void Emit(ushort objectId, LifecycleEventType? lifecycle)
+    private void Emit(ushort objectId, LifecycleEventType? lifecycle, ushort? parentObjectId = null)
     {
         // The object may already have been removed from _states (e.g. Delete already ran) --
         // GetOrCreateState is safe to call again since we still want a sample recorded for the
         // transition itself, using whatever state existed at deletion time.
         var state = _states.TryGetValue(objectId, out var existing) ? existing : GetOrCreateState(objectId);
-        _samples.Add(new TimelineSample(_currentTime, objectId, state.Position, state.Rotation, state.Scale, state.Visible, lifecycle));
+        _samples.Add(new TimelineSample(_currentTime, objectId, parentObjectId, state.Position, state.Rotation, state.Scale, state.Visible, lifecycle));
     }
 
     /// <summary>

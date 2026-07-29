@@ -86,10 +86,11 @@ public static class EventParser
             case EventType.InstantiateObject:
             {
                 ushort templateId = BinaryPrimitives.ReadUInt16LittleEndian(payload);
-                var position = Quantize.DecodeVector3_16(payload.Slice(2, 6), pos);
-                var rotation = Quantize.DecodeQuatSmallestThree(payload.Slice(8, 4), quatTrue);
-                var scale = Quantize.DecodeVector3_16(payload.Slice(12, 6), scaleTrue);
-                return new InstantiateObjectEvent(objectId, templateId, position, rotation, scale);
+                ushort parentId = BinaryPrimitives.ReadUInt16LittleEndian(payload.Slice(2, 2));
+                var position = Quantize.DecodeVector3_16(payload.Slice(4, 6), pos);
+                var rotation = Quantize.DecodeQuatSmallestThree(payload.Slice(10, 4), quatTrue);
+                var scale = Quantize.DecodeVector3_16(payload.Slice(14, 6), scaleTrue);
+                return new InstantiateObjectEvent(objectId, templateId, parentId, position, rotation, scale);
             }
 
             case EventType.TruePosition:
