@@ -15,10 +15,11 @@ namespace MoodyBlues.Backend.Session;
 public static class AnimationOptimizer
 {
     public static AnimationFileDto Optimize(double durationSeconds, List<RawObjectTimeline> rawObjects)
-    {
-        var objects = rawObjects.Select(OptimizeObject).ToList();
-        return new AnimationFileDto { DurationSeconds = durationSeconds, Objects = objects };
-    }
+{
+    var objects = new AnimationObjectDto[rawObjects.Count];
+    Parallel.For(0, rawObjects.Count, i => { objects[i] = OptimizeObject(rawObjects[i]); });
+    return new AnimationFileDto { DurationSeconds = durationSeconds, Objects = objects.ToList() };
+}
 
     /// <summary>Total keyframe count across every channel of every object, for Session.KeyframeCount.</summary>
     public static long CountKeyframes(AnimationFileDto file)

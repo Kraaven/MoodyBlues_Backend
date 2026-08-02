@@ -3,17 +3,17 @@ using MoodyBlues.Backend.Protocol;
 namespace MoodyBlues.Backend.Session;
 
 /// <summary>Un-optimized per-channel (time, value) samples for one tracked object, plus its lifecycle timeline.</summary>
-    public sealed class RawObjectTimeline
-    {
-        public required ushort ObjectId { get; init; }
+public sealed class RawObjectTimeline
+{
+    public required ushort ObjectId { get; init; }
 
-        /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
-        public ushort? TemplateObjectId { get; init; }
+    /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
+    public ushort? TemplateObjectId { get; init; }
 
-        /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
-        public ushort? ParentObjectId { get; init; }
+    /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
+    public ushort? ParentObjectId { get; init; }
 
-        public List<(double Time, float Value)> PosX { get; } = new();
+    public List<(double Time, float Value)> PosX { get; } = new();
     public List<(double Time, float Value)> PosY { get; } = new();
     public List<(double Time, float Value)> PosZ { get; } = new();
     public List<(double Time, float Value)> RotX { get; } = new();
@@ -38,19 +38,19 @@ public static class AnimationBuilder
     {
         var byObjectId = new Dictionary<ushort, RawObjectTimeline>();
 
-foreach (ushort objectId in timeline.ObjectOrder)
+        foreach (ushort objectId in timeline.ObjectOrder)
+        {
+            byObjectId[objectId] = new RawObjectTimeline
             {
-                byObjectId[objectId] = new RawObjectTimeline
-                {
-                    ObjectId = objectId,
-                    TemplateObjectId = timeline.TemplateObjectIdByObjectId.TryGetValue(objectId, out ushort templateId)
-                        ? templateId
-                        : null,
-                    ParentObjectId = timeline.ParentObjectIdByObjectId.TryGetValue(objectId, out ushort parentId)
-                        ? parentId
-                        : null,
-                };
-            }
+                ObjectId = objectId,
+                TemplateObjectId = timeline.TemplateObjectIdByObjectId.TryGetValue(objectId, out ushort templateId)
+                    ? templateId
+                    : null,
+                ParentObjectId = timeline.ParentObjectIdByObjectId.TryGetValue(objectId, out ushort parentId)
+                    ? parentId
+                    : null,
+            };
+        }
 
         foreach (TimelineSample sample in timeline.Samples)
         {
@@ -61,16 +61,16 @@ foreach (ushort objectId in timeline.ObjectOrder)
                 continue;
             }
 
-            obj.PosX.Add((sample.Time, sample.Position.X));
-            obj.PosY.Add((sample.Time, sample.Position.Y));
-            obj.PosZ.Add((sample.Time, sample.Position.Z));
-            obj.RotX.Add((sample.Time, sample.Rotation.X));
-            obj.RotY.Add((sample.Time, sample.Rotation.Y));
-            obj.RotZ.Add((sample.Time, sample.Rotation.Z));
-            obj.RotW.Add((sample.Time, sample.Rotation.W));
-            obj.SclX.Add((sample.Time, sample.Scale.X));
-            obj.SclY.Add((sample.Time, sample.Scale.Y));
-            obj.SclZ.Add((sample.Time, sample.Scale.Z));
+            AppendPoint(obj.PosX, sample.Time, sample.Position.X);
+            AppendPoint(obj.PosY, sample.Time, sample.Position.Y);
+            AppendPoint(obj.PosZ, sample.Time, sample.Position.Z);
+            AppendPoint(obj.RotX, sample.Time, sample.Rotation.X);
+            AppendPoint(obj.RotY, sample.Time, sample.Rotation.Y);
+            AppendPoint(obj.RotZ, sample.Time, sample.Rotation.Z);
+            AppendPoint(obj.RotW, sample.Time, sample.Rotation.W);
+            AppendPoint(obj.SclX, sample.Time, sample.Scale.X);
+            AppendPoint(obj.SclY, sample.Time, sample.Scale.Y);
+            AppendPoint(obj.SclZ, sample.Time, sample.Scale.Z);
 
             if (sample.Lifecycle is { } lifecycle)
             {
@@ -79,5 +79,18 @@ foreach (ushort objectId in timeline.ObjectOrder)
         }
 
         return byObjectId.Values.ToList();
+    }
+
+    private static void AppendPoint(List<(double Time, float Value)> list, double time, float value)
+    {
+        int count = list.Count;
+        if (count >= 2 && list[count - 1].Value == value && list[count - 2].Value == value)
+        {
+            list[count - 1] = (time, value);
+        }
+        else
+        {
+            list.Add((time, value));
+        }
     }
 }
