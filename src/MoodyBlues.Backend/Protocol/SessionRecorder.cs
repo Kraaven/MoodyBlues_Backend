@@ -35,7 +35,12 @@ public sealed record SessionTimeline(
     IReadOnlyDictionary<ushort, ushort> TemplateObjectIdByObjectId,
     IReadOnlyDictionary<ushort, ushort> ParentObjectIdByObjectId,
     double DurationSeconds,
-    long RawEventCount);
+    long RawEventCount,
+    /// <summary>
+    /// Concatenated Unity-wire bytes for lifecycle events only (types 24–28), uncompressed.
+    /// Transform events (1–23) are stripped. Gzipped to disk by <c>SessionFinalizer</c>.
+    /// </summary>
+    ReadOnlyMemory<byte> StrippedEventLog);
 
 /// <summary>
 /// Per-connection object-state tracker. Applies every decoded wire event (Spec.md Section 5) to a
@@ -72,6 +77,7 @@ public sealed class SessionRecorder
     private readonly List<ushort> _objectOrder = new();
     private readonly HashSet<ushort> _seenObjects = new();
     private readonly List<TimelineSample> _samples = new();
+    private readonly MemoryStream _strippedEventLog = new();
 
     // TimeStamp events arrive once per tick (only if something changed that tick) or once per
     // lifecycle event, and apply to every following envelope event until the next TimeStamp --
@@ -79,9 +85,19 @@ public sealed class SessionRecorder
     // Unity side. This is that cursor.
     private double _currentTime;
 
+    // True after a TimeStamp until we either write it into the stripped log (ahead of a lifecycle
+    // event) or a newer TimeStamp replaces it. Transform-only ticks never flush into the log.
+    private bool _strippedNeedsTimeStamp;
+
     public long RawEventCount { get; private set; }
 
-    public void Record(MoodyEvent evt)
+    /// <param name="evt">Decoded wire event.</param>
+    /// <param name="originalWireBytes">
+    /// Optional original wire bytes for <paramref name="evt"/>. When present for lifecycle events,
+    /// those bytes are copied into the stripped log (avoids a second quantize pass on Instantiates).
+    /// TimeStamp re-encode still uses <see cref="EventLogEncoder"/> so transform-only ticks can be dropped.
+    /// </param>
+    public void Record(MoodyEvent evt, ReadOnlySpan<byte> originalWireBytes = default)
     {
         RawEventCount++;
 
@@ -89,25 +105,30 @@ public sealed class SessionRecorder
         {
             case TimeStampEvent ts:
                 _currentTime = ts.Seconds;
+                _strippedNeedsTimeStamp = true;
                 return;
 
             case ShowObjectEvent show:
+                AppendLifecycleToStrippedLog(evt, originalWireBytes);
                 GetOrCreateState(show.ObjectId).Visible = true;
                 Emit(show.ObjectId, LifecycleEventType.Show);
                 return;
 
             case HideObjectEvent hide:
+                AppendLifecycleToStrippedLog(evt, originalWireBytes);
                 GetOrCreateState(hide.ObjectId).Visible = false;
                 Emit(hide.ObjectId, LifecycleEventType.Hide);
                 return;
 
             case DeleteObjectEvent delete:
+                AppendLifecycleToStrippedLog(evt, originalWireBytes);
                 Emit(delete.ObjectId, LifecycleEventType.Delete);
                 _states.Remove(delete.ObjectId);
                 return;
 
             case InstantiateObjectEvent inst:
             {
+                AppendLifecycleToStrippedLog(evt, originalWireBytes);
                 var state = GetOrCreateState(inst.ObjectId);
                 state.Position = inst.Position;
                 state.Rotation = inst.Rotation;
@@ -130,7 +151,35 @@ public sealed class SessionRecorder
 
     public SessionTimeline Finalize()
     {
-        return new SessionTimeline(_samples, _objectOrder, _templateByObjectId, _parentByObjectId, _currentTime, RawEventCount);
+        return new SessionTimeline(
+            _samples,
+            _objectOrder,
+            _templateByObjectId,
+            _parentByObjectId,
+            _currentTime,
+            RawEventCount,
+            _strippedEventLog.ToArray());
+    }
+
+    private void AppendLifecycleToStrippedLog(MoodyEvent lifecycleEvent, ReadOnlySpan<byte> originalWireBytes)
+    {
+        Span<byte> scratch = stackalloc byte[EventLogEncoder.MaxEventSize];
+
+        if (_strippedNeedsTimeStamp)
+        {
+            int tsLen = EventLogEncoder.EncodeTimeStamp(_currentTime, scratch);
+            _strippedEventLog.Write(scratch[..tsLen]);
+            _strippedNeedsTimeStamp = false;
+        }
+
+        if (!originalWireBytes.IsEmpty)
+        {
+            _strippedEventLog.Write(originalWireBytes);
+            return;
+        }
+
+        int len = EventLogEncoder.Encode(lifecycleEvent, scratch);
+        _strippedEventLog.Write(scratch[..len]);
     }
 
     private ObjectState GetOrCreateState(ushort objectId)

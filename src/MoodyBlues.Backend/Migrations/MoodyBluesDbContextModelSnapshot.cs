@@ -129,6 +129,12 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
+                    b.Property<string>("EventLogPath")
+                        .HasColumnType("text");
+
+                    b.Property<long>("EventLogSizeBytes")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("KeyframeCount")
                         .HasColumnType("bigint");
 

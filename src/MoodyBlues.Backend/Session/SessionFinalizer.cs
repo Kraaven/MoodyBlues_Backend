@@ -51,6 +51,9 @@ public sealed class SessionFinalizer(IServiceScopeFactory scopeFactory, ServerCo
         db.Sessions.Add(session);
         await db.SaveChangesAsync(cancellationToken);
 
+        string? animationFullPath = null;
+        string? eventsFullPath = null;
+
         try
         {
             List<RawObjectTimeline> raw = AnimationBuilder.Build(timeline);
@@ -60,32 +63,68 @@ public sealed class SessionFinalizer(IServiceScopeFactory scopeFactory, ServerCo
             string developerDir = Path.Combine(config.SessionsDir, developerId);
             Directory.CreateDirectory(developerDir);
             string relativePath = Path.Combine(developerId, $"{session.Id}.json.gz");
-            string fullPath = Path.Combine(config.SessionsDir, relativePath);
+            animationFullPath = Path.Combine(config.SessionsDir, relativePath);
 
-            using (var fileStream = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var fileStream = new FileStream(animationFullPath, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var gzip = new GZipStream(fileStream, CompressionLevel.Optimal))
             {
                 await JsonSerializer.SerializeAsync(gzip, animation, JsonOptions, cancellationToken);
             }
 
-            long sizeBytes = new FileInfo(fullPath).Length;
+            long sizeBytes = new FileInfo(animationFullPath).Length;
+
+            string eventsRelativePath = Path.Combine(developerId, $"{session.Id}.events.bin.gz");
+            eventsFullPath = Path.Combine(config.SessionsDir, eventsRelativePath);
+            using (var fileStream = new FileStream(eventsFullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var gzip = new GZipStream(fileStream, CompressionLevel.Optimal))
+            {
+                await gzip.WriteAsync(timeline.StrippedEventLog, cancellationToken);
+            }
+
+            long eventLogSizeBytes = new FileInfo(eventsFullPath).Length;
 
             session.AnimationPath = relativePath;
             session.AnimationSizeBytes = sizeBytes;
+            session.EventLogPath = eventsRelativePath;
+            session.EventLogSizeBytes = eventLogSizeBytes;
             session.KeyframeCount = keyframeCount;
             session.Status = SessionStatus.Ready;
             await db.SaveChangesAsync(cancellationToken);
 
             ConsoleLog.Info(
                 $"Session {session.Id}: finalized (developer={developerId} scene={sceneId}) -- " +
-                $"{timeline.RawEventCount} raw events -> {keyframeCount} keyframes, {sizeBytes} bytes gzipped");
+                $"{timeline.RawEventCount} raw events -> {keyframeCount} keyframes, {sizeBytes} bytes animation gzipped, " +
+                $"{eventLogSizeBytes} bytes event log gzipped");
         }
         catch (Exception ex)
         {
+            TryDelete(animationFullPath);
+            TryDelete(eventsFullPath);
+
             session.Status = SessionStatus.Failed;
             session.ErrorMessage = ex.Message;
             await db.SaveChangesAsync(cancellationToken);
             ConsoleLog.Error($"Session {session.Id}: failed to build/optimize animation", ex);
+        }
+    }
+
+    private static void TryDelete(string? path)
+    {
+        if (path is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup of partial artifacts.
         }
     }
 }

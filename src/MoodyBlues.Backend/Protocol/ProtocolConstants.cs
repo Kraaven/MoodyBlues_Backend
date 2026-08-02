@@ -13,8 +13,8 @@ public static class ProtocolConstants
     /// <summary>TimeStamp is the only event with no envelope: 1 byte EventType + 8 byte double.</summary>
     public const int TimestampSize = 9;
 
-    /// <summary>Max single event size (InstantiateObject), Spec.md Section 8.</summary>
-    public const int MaxEventSize = 21;
+    /// <summary>Max single event size (InstantiateObject = envelope 3 + payload 20), Spec.md Section 8.</summary>
+    public const int MaxEventSize = 23;
 
     /// <summary>
     /// Payload size in bytes (NOT including the 3-byte envelope) for every

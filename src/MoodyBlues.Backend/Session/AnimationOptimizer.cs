@@ -65,6 +65,7 @@ public static class AnimationOptimizer
         {
             ObjectId = raw.ObjectId,
             TemplateObjectId = raw.TemplateObjectId,
+            ParentObjectId = raw.ParentObjectId,
             Channels = channels,
             Lifecycle = lifecycle,
         };

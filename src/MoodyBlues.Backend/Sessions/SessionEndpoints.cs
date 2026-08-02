@@ -26,6 +26,7 @@ public static class SessionEndpoints
         var sessionGroup = app.MapGroup("/api/sessions/{sessionId}").RequireAuthorization();
         sessionGroup.MapGet("/", GetAsync);
         sessionGroup.MapGet("/animation", DownloadAnimationAsync);
+        sessionGroup.MapGet("/events", DownloadEventsAsync);
         sessionGroup.MapDelete("/", DeleteAsync);
     }
 
@@ -80,6 +81,7 @@ public static class SessionEndpoints
             session.KeyframeCount,
             session.ObjectCount,
             session.AnimationSizeBytes,
+            session.EventLogSizeBytes,
             session.Status,
             session.ErrorMessage));
     }
@@ -119,6 +121,40 @@ public static class SessionEndpoints
     }
 
     /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
+    public static async Task<IResult> DownloadEventsAsync(
+        string sessionId,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db,
+        ServerConfig config,
+        HttpContext httpContext)
+    {
+        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        if (session!.Status != SessionStatus.Ready || session.EventLogPath is null)
+        {
+            return Results.NotFound("Event log is not ready yet.");
+        }
+
+        string fullPath = Path.Combine(config.SessionsDir, session.EventLogPath);
+        if (!File.Exists(fullPath))
+        {
+            return Results.NotFound("Event log file is not on disk.");
+        }
+
+        // The file on disk is gzipped binary; Content-Encoding lets fetch() decompress transparently.
+        httpContext.Response.Headers.ContentEncoding = "gzip";
+
+        return Results.File(
+            Path.GetFullPath(fullPath),
+            contentType: "application/octet-stream",
+            fileDownloadName: $"{session.Id}.events.bin");
+    }
+
+    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
     public static async Task<IResult> DeleteAsync(
         string sessionId,
         ClaimsPrincipal principal,
@@ -137,6 +173,15 @@ public static class SessionEndpoints
             if (File.Exists(fullPath))
             {
                 File.Delete(fullPath);
+            }
+        }
+
+        if (session.EventLogPath is not null)
+        {
+            string eventsPath = Path.Combine(config.SessionsDir, session.EventLogPath);
+            if (File.Exists(eventsPath))
+            {
+                File.Delete(eventsPath);
             }
         }
 
@@ -186,5 +231,6 @@ public static class SessionEndpoints
             s.KeyframeCount,
             s.ObjectCount,
             s.AnimationSizeBytes,
+            s.EventLogSizeBytes,
             s.Status);
 }

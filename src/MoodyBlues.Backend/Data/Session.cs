@@ -12,8 +12,9 @@ public enum SessionStatus
 /// One finalized recording of a Unity <c>/stream</c> connection: the decoded wire events are
 /// turned into a keyframe animation (see <c>Session/AnimationBuilder.cs</c>), optimized (see
 /// <c>Session/AnimationOptimizer.cs</c>), and gzipped to disk under
-/// <see cref="Config.ServerConfig.SessionsDir"/>. This row is the queryable/dashboard-facing
-/// record of that; the animation payload itself lives on disk, not in Postgres.
+/// <see cref="Config.ServerConfig.SessionsDir"/>, alongside a stripped lifecycle event log
+/// (types 24–28 only) for frontend playback cross-checks. This row is the queryable record;
+/// the animation and event-log payloads live on disk, not in Postgres.
 /// </summary>
 public sealed class Session
 {
@@ -27,6 +28,11 @@ public sealed class Session
     public string? AnimationPath { get; set; }
 
     public long AnimationSizeBytes { get; set; }
+
+    /// <summary>Path (relative to <see cref="Config.ServerConfig.SessionsDir"/>) of the gzipped stripped event log (lifecycle wire events).</summary>
+    public string? EventLogPath { get; set; }
+
+    public long EventLogSizeBytes { get; set; }
 
     /// <summary>Number of raw wire events decoded, before any optimization.</summary>
     public long RawEventCount { get; set; }

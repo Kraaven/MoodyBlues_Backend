@@ -165,6 +165,105 @@ public class SessionRecorderAndAnimationTests
         Assert.Equal(2, simplified.Count);
     }
 
+    [Fact]
+    public void Recorder_StrippedEventLog_DropsTransforms_KeepsLifecycle()
+    {
+        var recorder = new SessionRecorder();
+        var pos = new Vector3(1, 2, 3);
+
+        recorder.Record(new TimeStampEvent(1.0));
+        recorder.Record(new TruePositionEvent(1, pos));
+        recorder.Record(new TimeStampEvent(2.0));
+        recorder.Record(new InstantiateObjectEvent(42, 7, 3, pos, Quaternion.Identity, Vector3.One));
+        recorder.Record(new TimeStampEvent(3.0));
+        recorder.Record(new DeltaPositionEvent(42, new Vector3(0.1f, 0, 0)));
+        recorder.Record(new TimeStampEvent(4.0));
+        recorder.Record(new HideObjectEvent(42));
+
+        SessionTimeline timeline = recorder.Finalize();
+        Assert.True(timeline.StrippedEventLog.Length > 0);
+
+        List<MoodyEvent> kept = EventParser.ParseMessage(timeline.StrippedEventLog.Span);
+        Assert.Equal(4, kept.Count);
+        Assert.IsType<TimeStampEvent>(kept[0]);
+        Assert.Equal(2.0, ((TimeStampEvent)kept[0]).Seconds);
+        Assert.IsType<InstantiateObjectEvent>(kept[1]);
+        var inst = (InstantiateObjectEvent)kept[1];
+        Assert.Equal(42, inst.ObjectId);
+        Assert.Equal(7, inst.TemplateObjectId);
+        Assert.Equal(3, inst.ParentObjectId);
+        Assert.IsType<TimeStampEvent>(kept[2]);
+        Assert.Equal(4.0, ((TimeStampEvent)kept[2]).Seconds);
+        Assert.IsType<HideObjectEvent>(kept[3]);
+        Assert.Equal(42, ((HideObjectEvent)kept[3]).ObjectId);
+    }
+
+    [Fact]
+    public void Recorder_StrippedEventLog_PreservesOriginalInstantiateBytes()
+    {
+        var pos = new Vector3(12.5f, -3.25f, 40f);
+        var scale = new Vector3(1.5f, 1.5f, 1.5f);
+        Span<byte> wire = stackalloc byte[EventLogEncoder.InstantiateObjectSize];
+        int written = EventLogEncoder.EncodeInstantiateObject(
+            42, 7, 3, pos, Quaternion.Identity, scale, wire);
+        Assert.Equal(EventLogEncoder.InstantiateObjectSize, written);
+
+        byte[] original = wire[..written].ToArray();
+        var decoded = (InstantiateObjectEvent)EventParser.ParseMessage(original).Single();
+
+        var recorder = new SessionRecorder();
+        recorder.Record(new TimeStampEvent(1.5));
+        recorder.Record(decoded, original);
+
+        SessionTimeline timeline = recorder.Finalize();
+        // TimeStamp (9) + original instantiate payload — exact wire bytes for the lifecycle event.
+        Assert.Equal(9 + original.Length, timeline.StrippedEventLog.Length);
+        Assert.True(timeline.StrippedEventLog.Span[9..].SequenceEqual(original));
+    }
+
+    [Fact]
+    public void EventLogEncoder_RoundTripsLifecycleEvents()
+    {
+        var pos = new Vector3(1, 2, 3);
+        var scale = new Vector3(2, 2, 2);
+        Span<byte> buf = stackalloc byte[EventLogEncoder.MaxEventSize];
+
+        int n = EventLogEncoder.EncodeShowObject(11, buf);
+        Assert.IsType<ShowObjectEvent>(Assert.Single(EventParser.ParseMessage(buf[..n])));
+
+        n = EventLogEncoder.EncodeHideObject(12, buf);
+        Assert.IsType<HideObjectEvent>(Assert.Single(EventParser.ParseMessage(buf[..n])));
+
+        n = EventLogEncoder.EncodeDeleteObject(13, buf);
+        Assert.IsType<DeleteObjectEvent>(Assert.Single(EventParser.ParseMessage(buf[..n])));
+
+        n = EventLogEncoder.EncodeInstantiateObject(42, 7, 9, pos, Quaternion.Identity, scale, buf);
+        var inst = Assert.IsType<InstantiateObjectEvent>(Assert.Single(EventParser.ParseMessage(buf[..n])));
+        Assert.Equal(42, inst.ObjectId);
+        Assert.Equal(7, inst.TemplateObjectId);
+        Assert.Equal(9, inst.ParentObjectId);
+        Assert.True(MathF.Abs(inst.Position.X - pos.X) < 0.02f);
+        Assert.True(MathF.Abs(inst.Scale.X - scale.X) < 0.02f);
+    }
+
+    [Fact]
+    public void AnimationOptimizer_EmitsParentObjectId()
+    {
+        var recorder = new SessionRecorder();
+        recorder.Record(new TimeStampEvent(0));
+        recorder.Record(new InstantiateObjectEvent(42, 7, 9, Vector3.One, Quaternion.Identity, Vector3.One));
+
+        SessionTimeline timeline = recorder.Finalize();
+        AnimationFileDto file = AnimationOptimizer.Optimize(
+            timeline.DurationSeconds,
+            AnimationBuilder.Build(timeline));
+
+        AnimationObjectDto obj = Assert.Single(file.Objects);
+        Assert.Equal(42, obj.ObjectId);
+        Assert.Equal((ushort)7, obj.TemplateObjectId);
+        Assert.Equal((ushort)9, obj.ParentObjectId);
+    }
+
     private static AnimationFileDto OptimizeSingleChannel(List<(double Time, float Value)> points, out string channelKey)
     {
         var raw = new RawObjectTimeline { ObjectId = 1 };

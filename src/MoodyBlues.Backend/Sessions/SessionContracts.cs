@@ -11,6 +11,7 @@ public sealed record SessionSummaryResponse(
     long KeyframeCount,
     int ObjectCount,
     long AnimationSizeBytes,
+    long EventLogSizeBytes,
     SessionStatus Status);
 
 public sealed record SessionDetailResponse(
@@ -23,5 +24,6 @@ public sealed record SessionDetailResponse(
     long KeyframeCount,
     int ObjectCount,
     long AnimationSizeBytes,
+    long EventLogSizeBytes,
     SessionStatus Status,
     string? ErrorMessage);

@@ -11,14 +11,19 @@ namespace MoodyBlues.Backend.Protocol;
 /// </summary>
 public static class EventParser
 {
-    public static List<MoodyEvent> ParseMessage(ReadOnlySpan<byte> data)
+    /// <summary>
+    /// Decodes every event in <paramref name="data"/> and invokes <paramref name="visitor"/> with
+    /// the event and its original wire-byte slice (useful when re-emitting lifecycle events
+    /// without a second encode/quantize pass).
+    /// </summary>
+    public static void VisitMessage(ReadOnlySpan<byte> data, Action<MoodyEvent, ReadOnlySpan<byte>> visitor)
     {
-        var result = new List<MoodyEvent>();
         int offset = 0;
         int n = data.Length;
 
         while (offset < n)
         {
+            int eventStart = offset;
             byte rawType = data[offset];
 
             if (rawType == (byte)EventType.TimeStamp)
@@ -30,8 +35,8 @@ public static class EventParser
                 }
 
                 double seconds = BinaryPrimitives.ReadDoubleLittleEndian(data.Slice(offset + 1, 8));
-                result.Add(new TimeStampEvent(seconds));
                 offset += ProtocolConstants.TimestampSize;
+                visitor(new TimeStampEvent(seconds), data.Slice(eventStart, ProtocolConstants.TimestampSize));
                 continue;
             }
 
@@ -56,10 +61,17 @@ public static class EventParser
                     $"need {payloadSize} bytes, have {n - payloadOffset}");
             }
 
-            result.Add(DecodePayload(eventType, objectId, data.Slice(payloadOffset, payloadSize)));
+            MoodyEvent decoded = DecodePayload(eventType, objectId, data.Slice(payloadOffset, payloadSize));
+            int eventLength = ProtocolConstants.EnvelopeSize + payloadSize;
             offset = payloadOffset + payloadSize;
+            visitor(decoded, data.Slice(eventStart, eventLength));
         }
+    }
 
+    public static List<MoodyEvent> ParseMessage(ReadOnlySpan<byte> data)
+    {
+        var result = new List<MoodyEvent>();
+        VisitMessage(data, (evt, _) => result.Add(evt));
         return result;
     }
 

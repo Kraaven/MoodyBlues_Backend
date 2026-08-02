@@ -47,6 +47,9 @@ public sealed class AnimationObjectDto
     /// <summary>Null for objects present in the initial scene walk; set for runtime-spawned instances (see InstantiateObjectEvent).</summary>
     public ushort? TemplateObjectId { get; init; }
 
+    /// <summary>Null for scene objects; parent ObjectID for runtime-spawned instances (0 = scene root).</summary>
+    public ushort? ParentObjectId { get; init; }
+
     public required Dictionary<string, AnimationChannelDto> Channels { get; init; }
 
     public required List<AnimationLifecycleDto> Lifecycle { get; init; }

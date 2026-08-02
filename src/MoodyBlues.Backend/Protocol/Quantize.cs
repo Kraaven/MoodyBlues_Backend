@@ -127,4 +127,69 @@ public static class Quantize
             Dequantize(yRaw, 10, range.Min, range.Max),
             Dequantize(zRaw, 11, range.Min, range.Max));
     }
+
+    // --- Encode (inverse of the Decode* helpers above; used by EventLogEncoder) ---
+
+    public static uint QuantizeValue(float value, int bits, float min, float max)
+    {
+        uint maxInt = (1u << bits) - 1u;
+        float t = (value - min) / (max - min);
+        t = Math.Clamp(t, 0f, 1f);
+        return (uint)MathF.Round(t * maxInt);
+    }
+
+    public static void EncodeScalar16(float value, (float Min, float Max) range, Span<byte> destination)
+    {
+        ushort raw = (ushort)QuantizeValue(value, 16, range.Min, range.Max);
+        BinaryPrimitives.WriteUInt16LittleEndian(destination, raw);
+    }
+
+    public static void EncodeVector3_16(Vector3 value, (float Min, float Max) range, Span<byte> destination)
+    {
+        EncodeScalar16(value.X, range, destination);
+        EncodeScalar16(value.Y, range, destination[2..]);
+        EncodeScalar16(value.Z, range, destination[4..]);
+    }
+
+    /// <summary>Section 7.5: smallest-three quaternion, 4 bytes (matches Unity Serializer).</summary>
+    public static void EncodeQuatSmallestThree(Quaternion q, (float Min, float Max) range, Span<byte> destination)
+    {
+        Span<float> components = stackalloc float[4] { q.X, q.Y, q.Z, q.W };
+
+        int droppedIndex = 0;
+        float largestAbs = MathF.Abs(components[0]);
+        for (int i = 1; i < 4; i++)
+        {
+            float abs = MathF.Abs(components[i]);
+            if (abs > largestAbs)
+            {
+                largestAbs = abs;
+                droppedIndex = i;
+            }
+        }
+
+        if (components[droppedIndex] < 0f)
+        {
+            components[0] = -components[0];
+            components[1] = -components[1];
+            components[2] = -components[2];
+            components[3] = -components[3];
+        }
+
+        uint packed = (uint)(droppedIndex & 0x3);
+        int shift = 2;
+        for (int i = 0; i < 4; i++)
+        {
+            if (i == droppedIndex)
+            {
+                continue;
+            }
+
+            uint quantized = QuantizeValue(components[i], 10, range.Min, range.Max);
+            packed |= (quantized & 0x3FFu) << shift;
+            shift += 10;
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(destination, packed);
+    }
 }

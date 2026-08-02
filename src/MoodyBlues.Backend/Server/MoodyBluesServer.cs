@@ -153,10 +153,16 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
                 $"First bytes: {preview}{(size > 32 ? " ..." : string.Empty)}");
         }
 
-        List<MoodyEvent> decodedEvents;
+        List<MoodyEvent> decodedEvents = new();
         try
         {
-            decodedEvents = EventParser.ParseMessage(message);
+            // Visit keeps each event's original wire slice so SessionRecorder can copy lifecycle
+            // bytes into the stripped event log without a second quantize pass.
+            EventParser.VisitMessage(message, (evt, wireBytes) =>
+            {
+                decodedEvents.Add(evt);
+                recorder.Record(evt, wireBytes);
+            });
         }
         catch (ProtocolException ex)
         {
@@ -171,11 +177,6 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         runtimeLogs.LogMessage(connectionId, messageNumber, size, decodedEvents);
         ConsoleLog.Info($"Connection #{connectionId}: message #{messageNumber} -> {size} bytes, {decodedEvents.Count} event(s)");
         stats.AddEvents(decodedEvents);
-
-        foreach (MoodyEvent evt in decodedEvents)
-        {
-            recorder.Record(evt);
-        }
     }
 
     /// <summary>Per-connection running totals, used only for the closing summary line.</summary>

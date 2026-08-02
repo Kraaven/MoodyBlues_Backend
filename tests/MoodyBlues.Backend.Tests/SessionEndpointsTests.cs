@@ -16,7 +16,8 @@ public class SessionEndpointsTests : IDisposable
 
     private async Task<(Guid UserId, string DeveloperId, MoodyBluesDbContext Db, Data.Session Session)> SeedOwnedSessionAsync(
         SessionStatus status = SessionStatus.Ready,
-        bool writeAnimationFile = true)
+        bool writeAnimationFile = true,
+        bool writeEventLogFile = true)
     {
         var db = TestDbContextFactory.Create();
         Guid userId = Guid.NewGuid();
@@ -26,6 +27,7 @@ public class SessionEndpointsTests : IDisposable
         string developerId = created!.DeveloperId;
 
         string relativePath = Path.Combine(developerId, "session-1.json.gz");
+        string eventsRelativePath = Path.Combine(developerId, "session-1.events.bin.gz");
         var session = new Data.Session
         {
             Id = Guid.NewGuid(),
@@ -34,6 +36,8 @@ public class SessionEndpointsTests : IDisposable
             Status = status,
             AnimationPath = status == SessionStatus.Ready ? relativePath : null,
             AnimationSizeBytes = 123,
+            EventLogPath = status == SessionStatus.Ready ? eventsRelativePath : null,
+            EventLogSizeBytes = status == SessionStatus.Ready ? 45 : 0,
             RawEventCount = 10,
             KeyframeCount = 4,
             DurationSeconds = 5.5,
@@ -43,11 +47,19 @@ public class SessionEndpointsTests : IDisposable
         db.Sessions.Add(session);
         await db.SaveChangesAsync();
 
-        if (writeAnimationFile && status == SessionStatus.Ready)
+        if (status == SessionStatus.Ready)
         {
-            string fullPath = Path.Combine(_sessionsDir, relativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-            await File.WriteAllBytesAsync(fullPath, [1, 2, 3]);
+            string dir = Path.Combine(_sessionsDir, developerId);
+            Directory.CreateDirectory(dir);
+            if (writeAnimationFile)
+            {
+                await File.WriteAllBytesAsync(Path.Combine(_sessionsDir, relativePath), [1, 2, 3]);
+            }
+
+            if (writeEventLogFile)
+            {
+                await File.WriteAllBytesAsync(Path.Combine(_sessionsDir, eventsRelativePath), [9, 8, 7]);
+            }
         }
 
         return (userId, developerId, db, session);
@@ -119,6 +131,45 @@ public class SessionEndpointsTests : IDisposable
         var (statusCode, _) = await HttpResultTestHelpers.ExecuteAsync(result);
 
         Assert.Equal(404, statusCode);
+    }
+
+    [Fact]
+    public async Task DownloadEvents_NotReady_ReturnsNotFound()
+    {
+        (Guid userId, string _, MoodyBluesDbContext db, Data.Session session) = await SeedOwnedSessionAsync(SessionStatus.Processing);
+        var config = new ServerConfig { SessionsDir = _sessionsDir };
+
+        var result = await SessionEndpoints.DownloadEventsAsync(
+            session.Id.ToString(), TestPrincipal.For(userId), db, config, new DefaultHttpContext());
+        var (statusCode, _) = await HttpResultTestHelpers.ExecuteAsync(result);
+
+        Assert.Equal(404, statusCode);
+    }
+
+    [Fact]
+    public async Task DownloadEvents_Ready_SetsGzipContentEncoding()
+    {
+        (Guid userId, string _, MoodyBluesDbContext db, Data.Session session) = await SeedOwnedSessionAsync();
+        var config = new ServerConfig { SessionsDir = _sessionsDir };
+        var httpContext = new DefaultHttpContext();
+
+        var result = await SessionEndpoints.DownloadEventsAsync(
+            session.Id.ToString(), TestPrincipal.For(userId), db, config, httpContext);
+
+        Assert.Equal("gzip", httpContext.Response.Headers.ContentEncoding.ToString());
+        // Results.File succeeds once the endpoint path points at an on-disk artifact.
+        Assert.NotNull(result);
+    }
+
+    [Fact]
+    public async Task Get_Owner_IncludesEventLogSizeBytes()
+    {
+        (Guid userId, string _, MoodyBluesDbContext db, Data.Session session) = await SeedOwnedSessionAsync();
+
+        var result = await SessionEndpoints.GetAsync(session.Id.ToString(), TestPrincipal.For(userId), db);
+        var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<SessionDetailResponse>(result);
+
+        Assert.Equal(session.EventLogSizeBytes, detail!.EventLogSizeBytes);
     }
 
     public void Dispose()
