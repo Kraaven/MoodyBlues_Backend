@@ -1,5 +1,6 @@
 using System.Numerics;
 using MoodyBlues.Backend.Protocol;
+using MoodyBlues.Backend.Scenes.Processing;
 using MoodyBlues.Backend.Session;
 using Xunit;
 
@@ -262,6 +263,46 @@ public class SessionRecorderAndAnimationTests
         Assert.Equal(42, obj.ObjectId);
         Assert.Equal((ushort)7, obj.TemplateObjectId);
         Assert.Equal((ushort)9, obj.ParentObjectId);
+    }
+
+    [Fact]
+    public void AnimationBuilder_SplitsReusedObjectIdAfterDeleteIntoSeparateInstances()
+    {
+        var recorder = new SessionRecorder();
+        recorder.Record(new TimeStampEvent(0));
+        recorder.Record(new InstantiateObjectEvent(5, 1, 0, new Vector3(0, 0, 0), Quaternion.Identity, Vector3.One));
+        recorder.Record(new TimeStampEvent(1));
+        recorder.Record(new TruePositionEvent(5, new Vector3(10, 0, 0)));
+        recorder.Record(new TimeStampEvent(2));
+        recorder.Record(new DeleteObjectEvent(5));
+        recorder.Record(new TimeStampEvent(3));
+        recorder.Record(new InstantiateObjectEvent(5, 2, 0, new Vector3(1, 0, 0), Quaternion.Identity, Vector3.One));
+        recorder.Record(new TimeStampEvent(4));
+        recorder.Record(new TruePositionEvent(5, new Vector3(20, 0, 0)));
+
+        List<RawObjectTimeline> raw = AnimationBuilder.Build(recorder.Finalize());
+
+        Assert.Equal(2, raw.Count);
+        RawObjectTimeline first = raw.Single(o => o.InstanceIndex == 0);
+        RawObjectTimeline second = raw.Single(o => o.InstanceIndex == 1);
+        Assert.Equal((ushort)1, first.TemplateObjectId);
+        Assert.Equal((ushort)2, second.TemplateObjectId);
+        Assert.Equal(10f, first.PosX[^1].Value);
+        Assert.Equal(20f, second.PosX[^1].Value);
+    }
+
+    [Fact]
+    public void Recorder_SeedsStateFromSceneRegistry()
+    {
+        var registry = new Dictionary<ushort, SceneObjectTransform>
+        {
+            [1] = new SceneObjectTransform(1, new Vector3(5, 6, 7), Quaternion.Identity, Vector3.One),
+        };
+        var recorder = new SessionRecorder(registry);
+        recorder.Record(new DeltaPositionEvent(1, new Vector3(1, 0, 0)));
+
+        SessionTimeline timeline = recorder.Finalize();
+        Assert.Equal(new Vector3(6, 6, 7), timeline.Samples[0].Position);
     }
 
     private static AnimationFileDto OptimizeSingleChannel(List<(double Time, float Value)> points, out string channelKey)

@@ -42,6 +42,10 @@ public sealed class SessionFinalizer(IServiceScopeFactory scopeFactory, ServerCo
             Id = Guid.NewGuid(),
             DeveloperId = developerId,
             SceneId = sceneId,
+            SceneHash = await db.Scenes
+                .Where(s => s.DeveloperId == developerId && s.SceneId == sceneId)
+                .Select(s => s.Hash)
+                .FirstOrDefaultAsync(cancellationToken),
             Status = SessionStatus.Processing,
             RawEventCount = timeline.RawEventCount,
             DurationSeconds = timeline.DurationSeconds,

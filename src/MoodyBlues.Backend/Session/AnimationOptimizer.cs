@@ -44,15 +44,17 @@ public static class AnimationOptimizer
 
     private static AnimationObjectDto OptimizeObject(RawObjectTimeline raw)
     {
+        OptimizeRotationChannels(raw, out AnimationChannelDto rotX, out AnimationChannelDto rotY, out AnimationChannelDto rotZ, out AnimationChannelDto rotW);
+
         var channels = new Dictionary<string, AnimationChannelDto>
         {
             ["posX"] = OptimizeChannel(raw.PosX),
             ["posY"] = OptimizeChannel(raw.PosY),
             ["posZ"] = OptimizeChannel(raw.PosZ),
-            ["rotX"] = OptimizeChannel(raw.RotX),
-            ["rotY"] = OptimizeChannel(raw.RotY),
-            ["rotZ"] = OptimizeChannel(raw.RotZ),
-            ["rotW"] = OptimizeChannel(raw.RotW),
+            ["rotX"] = rotX,
+            ["rotY"] = rotY,
+            ["rotZ"] = rotZ,
+            ["rotW"] = rotW,
             ["sclX"] = OptimizeChannel(raw.SclX),
             ["sclY"] = OptimizeChannel(raw.SclY),
             ["sclZ"] = OptimizeChannel(raw.SclZ),
@@ -65,11 +67,121 @@ public static class AnimationOptimizer
         return new AnimationObjectDto
         {
             ObjectId = raw.ObjectId,
+            InstanceIndex = raw.InstanceIndex,
             TemplateObjectId = raw.TemplateObjectId,
             ParentObjectId = raw.ParentObjectId,
             Channels = channels,
             Lifecycle = lifecycle,
         };
+    }
+
+    private static void OptimizeRotationChannels(
+        RawObjectTimeline raw,
+        out AnimationChannelDto rotX,
+        out AnimationChannelDto rotY,
+        out AnimationChannelDto rotZ,
+        out AnimationChannelDto rotW)
+    {
+        int n = raw.RotX.Count;
+        if (n == 0)
+        {
+            rotX = rotY = rotZ = rotW = new AnimationChannelDto { Type = "constant", Value = 0f };
+            return;
+        }
+
+        if (n == 1)
+        {
+            rotX = new AnimationChannelDto { Type = "constant", Value = raw.RotX[0].Value };
+            rotY = new AnimationChannelDto { Type = "constant", Value = raw.RotY[0].Value };
+            rotZ = new AnimationChannelDto { Type = "constant", Value = raw.RotZ[0].Value };
+            rotW = new AnimationChannelDto { Type = "constant", Value = raw.RotW[0].Value };
+            return;
+        }
+
+        float min = float.MaxValue, max = float.MinValue;
+        foreach (var channel in new[] { raw.RotX, raw.RotY, raw.RotZ, raw.RotW })
+        {
+            foreach (var (_, value) in channel)
+            {
+                if (value < min) min = value;
+                if (value > max) max = value;
+            }
+        }
+
+        if (max - min < 1e-5f)
+        {
+            rotX = new AnimationChannelDto { Type = "constant", Value = raw.RotX[0].Value };
+            rotY = new AnimationChannelDto { Type = "constant", Value = raw.RotY[0].Value };
+            rotZ = new AnimationChannelDto { Type = "constant", Value = raw.RotZ[0].Value };
+            rotW = new AnimationChannelDto { Type = "constant", Value = raw.RotW[0].Value };
+            return;
+        }
+
+        double tolerance = Math.Max(1e-5, (max - min) * 0.002);
+        bool[] keep = DouglasPeucker.GetKeepMaskMulti(
+            [raw.RotX, raw.RotY, raw.RotZ, raw.RotW],
+            tolerance);
+
+        var simplifiedX = new List<(double Time, float Value)>();
+        var simplifiedY = new List<(double Time, float Value)>();
+        var simplifiedZ = new List<(double Time, float Value)>();
+        var simplifiedW = new List<(double Time, float Value)>();
+        for (int i = 0; i < n; i++)
+        {
+            if (!keep[i]) continue;
+            simplifiedX.Add(raw.RotX[i]);
+            simplifiedY.Add(raw.RotY[i]);
+            simplifiedZ.Add(raw.RotZ[i]);
+            simplifiedW.Add(raw.RotW[i]);
+        }
+
+        if (simplifiedX.Count <= 2)
+        {
+            rotX = new AnimationChannelDto { Type = "linear", T0 = simplifiedX[0].Time, V0 = simplifiedX[0].Value, T1 = simplifiedX[^1].Time, V1 = simplifiedX[^1].Value };
+            rotY = new AnimationChannelDto { Type = "linear", T0 = simplifiedY[0].Time, V0 = simplifiedY[0].Value, T1 = simplifiedY[^1].Time, V1 = simplifiedY[^1].Value };
+            rotZ = new AnimationChannelDto { Type = "linear", T0 = simplifiedZ[0].Time, V0 = simplifiedZ[0].Value, T1 = simplifiedZ[^1].Time, V1 = simplifiedZ[^1].Value };
+            rotW = new AnimationChannelDto { Type = "linear", T0 = simplifiedW[0].Time, V0 = simplifiedW[0].Value, T1 = simplifiedW[^1].Time, V1 = simplifiedW[^1].Value };
+            return;
+        }
+
+        float qMin = simplifiedX[0].Value, qMax = simplifiedX[0].Value;
+        foreach (var list in new[] { simplifiedX, simplifiedY, simplifiedZ, simplifiedW })
+        {
+            foreach (var (_, value) in list)
+            {
+                if (value < qMin) qMin = value;
+                if (value > qMax) qMax = value;
+            }
+        }
+
+        if (qMax - qMin < 1e-6f) qMax = qMin + 1e-6f;
+
+        int count = simplifiedX.Count;
+        var times = new double[count];
+        var valuesX = new ushort[count];
+        var valuesY = new ushort[count];
+        var valuesZ = new ushort[count];
+        var valuesW = new ushort[count];
+        for (int i = 0; i < count; i++)
+        {
+            times[i] = simplifiedX[i].Time;
+            valuesX[i] = QuantizeToUshort(simplifiedX[i].Value, qMin, qMax);
+            valuesY[i] = QuantizeToUshort(simplifiedY[i].Value, qMin, qMax);
+            valuesZ[i] = QuantizeToUshort(simplifiedZ[i].Value, qMin, qMax);
+            valuesW[i] = QuantizeToUshort(simplifiedW[i].Value, qMin, qMax);
+        }
+
+        rotX = new AnimationChannelDto { Type = "keyframes", Min = qMin, Max = qMax, Times = times, Values = valuesX };
+        rotY = new AnimationChannelDto { Type = "keyframes", Min = qMin, Max = qMax, Times = times, Values = valuesY };
+        rotZ = new AnimationChannelDto { Type = "keyframes", Min = qMin, Max = qMax, Times = times, Values = valuesZ };
+        rotW = new AnimationChannelDto { Type = "keyframes", Min = qMin, Max = qMax, Times = times, Values = valuesW };
+    }
+
+    private static ushort QuantizeToUshort(float value, float min, float max)
+    {
+        float t = (value - min) / (max - min);
+        t = Math.Clamp(t, 0f, 1f);
+        return (ushort)Math.Round(t * 65535f);
     }
 
     private static AnimationChannelDto OptimizeChannel(List<(double Time, float Value)> points)

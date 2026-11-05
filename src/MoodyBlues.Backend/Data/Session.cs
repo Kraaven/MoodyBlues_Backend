@@ -24,6 +24,9 @@ public sealed class Session
 
     public required string SceneId { get; set; }
 
+    /// <summary>Hash of the scene file this session was recorded against, for staleness detection.</summary>
+    public string? SceneHash { get; set; }
+
     /// <summary>Path (relative to <see cref="Config.ServerConfig.SessionsDir"/>) of the gzipped animation JSON.</summary>
     public string? AnimationPath { get; set; }
 

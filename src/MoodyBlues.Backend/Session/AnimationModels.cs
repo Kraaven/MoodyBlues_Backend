@@ -44,6 +44,9 @@ public sealed class AnimationObjectDto
 {
     public required ushort ObjectId { get; init; }
 
+    /// <summary>Zero for the first lifecycle segment; increments when the same wire ObjectId is reused after Delete.</summary>
+    public int InstanceIndex { get; init; }
+
     /// <summary>Null for objects present in the initial scene walk; set for runtime-spawned instances (see InstantiateObjectEvent).</summary>
     public ushort? TemplateObjectId { get; init; }
 
@@ -58,6 +61,9 @@ public sealed class AnimationObjectDto
 /// <summary>The full on-disk (gzipped) animation document for one Session.</summary>
 public sealed class AnimationFileDto
 {
+    /// <summary>Schema version for forward-compatible parsing on the frontend.</summary>
+    public int SchemaVersion { get; init; } = 1;
+
     public double DurationSeconds { get; init; }
 
     public required List<AnimationObjectDto> Objects { get; init; }

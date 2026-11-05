@@ -21,7 +21,8 @@ namespace MoodyBlues.Backend.Scenes.Processing;
 public sealed class SceneProcessingWorker(
     SceneProcessingQueue queue,
     IServiceScopeFactory scopeFactory,
-    ServerConfig config) : BackgroundService
+    ServerConfig config,
+    SceneObjectRegistryStore registryStore) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -82,6 +83,22 @@ public sealed class SceneProcessingWorker(
             ConsoleLog.Warn($"Scene processing: developer={job.DeveloperId} scene={job.SceneId} failed -- serving raw upload instead.");
         }
 
+        BuildAndSaveRegistry(job.DeveloperId, job.SceneId, rawFullPath);
+
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private void BuildAndSaveRegistry(string developerId, string sceneId, string rawGlbPath)
+    {
+        try
+        {
+            var registry = SceneObjectRegistryBuilder.BuildFromGlb(rawGlbPath);
+            registryStore.Save(developerId, sceneId, registry);
+            ConsoleLog.Info($"Scene registry: developer={developerId} scene={sceneId} -- {registry.Count} object(s).");
+        }
+        catch (Exception ex)
+        {
+            ConsoleLog.Warn($"Scene registry: failed for developer={developerId} scene={sceneId}: {ex.Message}");
+        }
     }
 }

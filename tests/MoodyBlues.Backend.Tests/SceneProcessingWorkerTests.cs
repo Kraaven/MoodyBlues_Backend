@@ -58,7 +58,7 @@ public class SceneProcessingWorkerTests : IDisposable
         await SeedRawSceneAsync(db, [1, 2, 3]);
         var config = new ServerConfig { ScenesDir = _scenesDir };
         var optimizer = new FakeGltfOptimizer(succeed: true, outputBytes: [9, 9]);
-        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config);
+        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config, new SceneObjectRegistryStore(config));
 
         await worker.ProcessJobAsync(new SceneProcessingJob("dev-1", "scene-1"), db, optimizer);
 
@@ -76,7 +76,7 @@ public class SceneProcessingWorkerTests : IDisposable
         await SeedRawSceneAsync(db, [1, 2, 3]);
         var config = new ServerConfig { ScenesDir = _scenesDir };
         var optimizer = new FakeGltfOptimizer(succeed: false);
-        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config);
+        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config, new SceneObjectRegistryStore(config));
 
         await worker.ProcessJobAsync(new SceneProcessingJob("dev-1", "scene-1"), db, optimizer);
 
@@ -92,7 +92,7 @@ public class SceneProcessingWorkerTests : IDisposable
         using var db = TestDbContextFactory.Create();
         var config = new ServerConfig { ScenesDir = _scenesDir };
         var optimizer = new FakeGltfOptimizer(succeed: true);
-        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config);
+        var worker = new SceneProcessingWorker(new SceneProcessingQueue(), null!, config, new SceneObjectRegistryStore(config));
 
         await worker.ProcessJobAsync(new SceneProcessingJob("dev-missing", "scene-missing"), db, optimizer);
 

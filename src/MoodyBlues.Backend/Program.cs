@@ -42,6 +42,7 @@ builder.Services.AddRequestDecompression();
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddSingleton<SceneProcessingQueue>();
+builder.Services.AddSingleton<SceneObjectRegistryStore>();
 builder.Services.AddSingleton<IGltfOptimizer, GltfTransformOptimizer>();
 builder.Services.AddHostedService<SceneProcessingWorker>();
 

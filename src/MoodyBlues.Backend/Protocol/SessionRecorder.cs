@@ -1,4 +1,5 @@
 using System.Numerics;
+using MoodyBlues.Backend.Scenes.Processing;
 
 namespace MoodyBlues.Backend.Protocol;
 
@@ -22,6 +23,7 @@ public enum LifecycleEventType
         double Time,
         ushort ObjectId,
         ushort? ParentObjectId,
+        ushort? TemplateObjectId,
         Vector3 Position,
         Quaternion Rotation,
         Vector3 Scale,
@@ -52,6 +54,8 @@ public sealed record SessionTimeline(
 /// </summary>
 public sealed class SessionRecorder
 {
+    private readonly IReadOnlyDictionary<ushort, SceneObjectTransform>? _sceneRegistry;
+
     private sealed class ObjectState
     {
         // NOTE: these defaults are a known limitation, not a considered "resting" value -- the
@@ -90,6 +94,11 @@ public sealed class SessionRecorder
     private bool _strippedNeedsTimeStamp;
 
     public long RawEventCount { get; private set; }
+
+    public SessionRecorder(IReadOnlyDictionary<ushort, SceneObjectTransform>? sceneRegistry = null)
+    {
+        _sceneRegistry = sceneRegistry;
+    }
 
     /// <param name="evt">Decoded wire event.</param>
     /// <param name="originalWireBytes">
@@ -135,7 +144,7 @@ public sealed class SessionRecorder
                 state.Scale = inst.Scale;
                 _templateByObjectId[inst.ObjectId] = inst.TemplateObjectId;
                 _parentByObjectId[inst.ObjectId] = inst.ParentObjectId;
-                Emit(inst.ObjectId, LifecycleEventType.Spawn);
+                Emit(inst.ObjectId, LifecycleEventType.Spawn, inst.ParentObjectId, inst.TemplateObjectId);
                 return;
             }
 
@@ -187,6 +196,13 @@ public sealed class SessionRecorder
         if (!_states.TryGetValue(objectId, out var state))
         {
             state = new ObjectState();
+            if (_sceneRegistry?.TryGetValue(objectId, out SceneObjectTransform? seed) == true)
+            {
+                state.Position = seed.Position;
+                state.Rotation = seed.Rotation;
+                state.Scale = seed.Scale;
+            }
+
             _states[objectId] = state;
         }
 
@@ -198,13 +214,13 @@ public sealed class SessionRecorder
         return state;
     }
 
-    private void Emit(ushort objectId, LifecycleEventType? lifecycle, ushort? parentObjectId = null)
+    private void Emit(ushort objectId, LifecycleEventType? lifecycle, ushort? parentObjectId = null, ushort? templateObjectId = null)
     {
         // The object may already have been removed from _states (e.g. Delete already ran) --
         // GetOrCreateState is safe to call again since we still want a sample recorded for the
         // transition itself, using whatever state existed at deletion time.
         var state = _states.TryGetValue(objectId, out var existing) ? existing : GetOrCreateState(objectId);
-        _samples.Add(new TimelineSample(_currentTime, objectId, parentObjectId, state.Position, state.Rotation, state.Scale, state.Visible, lifecycle));
+        _samples.Add(new TimelineSample(_currentTime, objectId, parentObjectId, templateObjectId, state.Position, state.Rotation, state.Scale, state.Visible, lifecycle));
     }
 
     /// <summary>

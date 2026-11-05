@@ -7,6 +7,8 @@ public sealed class RawObjectTimeline
 {
     public required ushort ObjectId { get; init; }
 
+    public int InstanceIndex { get; init; }
+
     /// <summary>Set only for runtime-spawned objects (see InstantiateObjectEvent) -- null for objects present in the initial scene walk.</summary>
     public ushort? TemplateObjectId { get; init; }
 
@@ -34,31 +36,46 @@ public sealed class RawObjectTimeline
 /// </summary>
 public static class AnimationBuilder
 {
+    private readonly record struct ObjectInstanceKey(ushort ObjectId, int InstanceIndex);
+
     public static List<RawObjectTimeline> Build(SessionTimeline timeline)
     {
-        var byObjectId = new Dictionary<ushort, RawObjectTimeline>();
+        var byKey = new Dictionary<ObjectInstanceKey, RawObjectTimeline>();
+        var instanceIndexByObject = new Dictionary<ushort, int>();
+        var deletedByObject = new Dictionary<ushort, bool>();
 
         foreach (ushort objectId in timeline.ObjectOrder)
         {
-            byObjectId[objectId] = new RawObjectTimeline
-            {
-                ObjectId = objectId,
-                TemplateObjectId = timeline.TemplateObjectIdByObjectId.TryGetValue(objectId, out ushort templateId)
-                    ? templateId
-                    : null,
-                ParentObjectId = timeline.ParentObjectIdByObjectId.TryGetValue(objectId, out ushort parentId)
-                    ? parentId
-                    : null,
-            };
+            instanceIndexByObject.TryAdd(objectId, 0);
+            deletedByObject.TryAdd(objectId, false);
         }
 
         foreach (TimelineSample sample in timeline.Samples)
         {
-            if (!byObjectId.TryGetValue(sample.ObjectId, out RawObjectTimeline? obj))
+            if (sample.Lifecycle == LifecycleEventType.Spawn && deletedByObject.GetValueOrDefault(sample.ObjectId))
             {
-                // Shouldn't happen (ObjectOrder is populated from the exact same events), but
-                // don't let one inconsistent sample take down the whole build.
-                continue;
+                instanceIndexByObject[sample.ObjectId] = instanceIndexByObject.GetValueOrDefault(sample.ObjectId) + 1;
+                deletedByObject[sample.ObjectId] = false;
+            }
+
+            if (sample.Lifecycle == LifecycleEventType.Delete)
+            {
+                deletedByObject[sample.ObjectId] = true;
+            }
+
+            int instanceIndex = instanceIndexByObject.GetValueOrDefault(sample.ObjectId, 0);
+            var key = new ObjectInstanceKey(sample.ObjectId, instanceIndex);
+
+            if (!byKey.TryGetValue(key, out RawObjectTimeline? obj))
+            {
+                obj = new RawObjectTimeline
+                {
+                    ObjectId = sample.ObjectId,
+                    InstanceIndex = instanceIndex,
+                    TemplateObjectId = sample.Lifecycle == LifecycleEventType.Spawn ? sample.TemplateObjectId : null,
+                    ParentObjectId = sample.Lifecycle == LifecycleEventType.Spawn ? sample.ParentObjectId : null,
+                };
+                byKey[key] = obj;
             }
 
             AppendPoint(obj.PosX, sample.Time, sample.Position.X);
@@ -78,7 +95,7 @@ public static class AnimationBuilder
             }
         }
 
-        return byObjectId.Values.ToList();
+        return byKey.Values.ToList();
     }
 
     private static void AppendPoint(List<(double Time, float Value)> list, double time, float value)

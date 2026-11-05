@@ -18,6 +18,7 @@ public sealed record SessionDetailResponse(
     Guid Id,
     string DeveloperId,
     string SceneId,
+    string? SceneHash,
     DateTime CreatedAtUtc,
     double DurationSeconds,
     long RawEventCount,

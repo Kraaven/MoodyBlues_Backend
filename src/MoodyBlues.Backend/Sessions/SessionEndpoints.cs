@@ -75,6 +75,7 @@ public static class SessionEndpoints
             session!.Id,
             session.DeveloperId,
             session.SceneId,
+            session.SceneHash,
             session.CreatedAtUtc,
             session.DurationSeconds,
             session.RawEventCount,

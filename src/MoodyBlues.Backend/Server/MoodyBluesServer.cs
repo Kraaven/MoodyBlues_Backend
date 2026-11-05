@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Protocol;
+using MoodyBlues.Backend.Scenes.Processing;
 using MoodyBlues.Backend.Session;
 
 namespace MoodyBlues.Backend.Server;
@@ -14,7 +15,7 @@ namespace MoodyBlues.Backend.Server;
 /// via inactivity timeout, or on error) <see cref="SessionFinalizer"/> builds, optimizes, and
 /// persists whatever was recorded as a <see cref="Data.Session"/>.
 /// </summary>
-public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLogs, SessionFinalizer sessionFinalizer)
+public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLogs, SessionFinalizer sessionFinalizer, SceneObjectRegistryStore registryStore)
 {
     private int _nextConnectionId;
 
@@ -25,7 +26,8 @@ public sealed class MoodyBluesServer(ServerConfig config, RuntimeLogs runtimeLog
         ConsoleLog.Info($"Connection #{connectionId} opened from {peer} (developer={developerId} scene={sceneId})");
 
         var stats = new ConnectionStats();
-        var recorder = new SessionRecorder();
+        var sceneRegistry = registryStore.Load(developerId, sceneId);
+        var recorder = new SessionRecorder(sceneRegistry);
         var receiveBuffer = new byte[8192];
         using var messageStream = new MemoryStream();
 
