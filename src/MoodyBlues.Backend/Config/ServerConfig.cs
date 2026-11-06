@@ -39,6 +39,13 @@ public sealed class ServerConfig
     public TimeSpan StreamInactivityTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// How often the server sends a one-byte KeepAlive message down each <c>/stream</c>
+    /// connection. The stream is otherwise client-to-server only, and a proxy in front of the
+    /// backend (Cloudflare) cuts connections whose origin side stays silent, at about 60 s.
+    /// </summary>
+    public TimeSpan StreamHeartbeatInterval { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// After a connection drops without EndSession, how long to wait for the client to reconnect
     /// before sealing the session and compiling it. The client's reconnect backoff totals 15 s.
     /// </summary>
@@ -80,6 +87,7 @@ public sealed class ServerConfig
             ScenesDir = Env("MOODYBLUES_SCENES_DIR") ?? "data/scenes",
             SessionsDir = Env("MOODYBLUES_SESSIONS_DIR") ?? "data/sessions",
             StreamInactivityTimeout = TimeSpan.FromSeconds(TryParseInt(Env("MOODYBLUES_STREAM_INACTIVITY_TIMEOUT_SECONDS"), 30)),
+            StreamHeartbeatInterval = TimeSpan.FromSeconds(Math.Max(1, TryParseInt(Env("MOODYBLUES_STREAM_HEARTBEAT_SECONDS"), 10))),
             ReconnectGracePeriod = TimeSpan.FromSeconds(TryParseInt(Env("MOODYBLUES_RECONNECT_GRACE_SECONDS"), 60)),
             SceneUploadWaitLimit = TimeSpan.FromHours(TryParseInt(Env("MOODYBLUES_SCENE_UPLOAD_WAIT_HOURS"), 24)),
             MaxSceneUploadBytes = TryParseInt(Env("MOODYBLUES_MAX_SCENE_UPLOAD_MB"), 512) * 1024L * 1024L,

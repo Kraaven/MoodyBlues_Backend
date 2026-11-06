@@ -91,6 +91,11 @@ public sealed class StreamServer(
         long messages = 0, rejected = 0;
         DateTime lastActivityWrite = DateTime.UtcNow;
 
+        // A WebSocket allows one send at a time; the heartbeat and the close replies share it.
+        using var sendLock = new SemaphoreSlim(1, 1);
+        using var heartbeatStop = new CancellationTokenSource();
+        Task heartbeat = RunHeartbeatAsync(socket, sendLock, heartbeatStop.Token);
+
         try
         {
             while (socket.State == WebSocketState.Open)
@@ -119,13 +124,13 @@ public sealed class StreamServer(
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None);
+                    await CloseOutputAsync(socket, sendLock, WebSocketCloseStatus.NormalClosure, "closing");
                     break;
                 }
 
                 if (tooLarge)
                 {
-                    await socket.CloseOutputAsync(WebSocketCloseStatus.MessageTooBig, "message too large", CancellationToken.None);
+                    await CloseOutputAsync(socket, sendLock, WebSocketCloseStatus.MessageTooBig, "message too large");
                     closeReason = RawLogCloseReason.Error;
                     break;
                 }
@@ -147,7 +152,7 @@ public sealed class StreamServer(
                     {
                         // Wrong protocol version or not a MoodyBlues client: refuse the connection.
                         ConsoleLog.Warn($"Session {sessionId}: refusing connection: {ex.Message}");
-                        await socket.CloseOutputAsync(WebSocketCloseStatus.ProtocolError, Truncate(ex.Message), CancellationToken.None);
+                        await CloseOutputAsync(socket, sendLock, WebSocketCloseStatus.ProtocolError, Truncate(ex.Message));
                         closeReason = RawLogCloseReason.Error;
                         break;
                     }
@@ -183,6 +188,9 @@ public sealed class StreamServer(
         }
         finally
         {
+            heartbeatStop.Cancel();
+            await heartbeat; // never throws; see RunHeartbeatAsync
+
             writer.AppendConnectionClosed(closeReason);
             long size = writer.Length;
             writers.Release(rawLogFull);
@@ -247,6 +255,56 @@ public sealed class StreamServer(
     }
 
     private static string Truncate(string s) => s.Length <= 120 ? s : s[..120];
+
+    /// <summary>
+    /// Sends a one-byte KeepAlive (the same event the client sends) every
+    /// <see cref="ServerConfig.StreamHeartbeatInterval"/> until the connection ends. Without it the
+    /// origin side of the connection is silent, and Cloudflare in front of the backend resets
+    /// such connections after about 60 s even while the client is streaming. The client discards
+    /// whatever the server sends. Never throws.
+    /// </summary>
+    private async Task RunHeartbeatAsync(WebSocket socket, SemaphoreSlim sendLock, CancellationToken cancellationToken)
+    {
+        byte[] keepAlive = [(byte)EventType.KeepAlive];
+        try
+        {
+            using var timer = new PeriodicTimer(config.StreamHeartbeatInterval);
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await sendLock.WaitAsync(cancellationToken);
+                try
+                {
+                    if (socket.State != WebSocketState.Open)
+                    {
+                        return;
+                    }
+
+                    await socket.SendAsync(keepAlive, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken);
+                }
+                finally
+                {
+                    sendLock.Release();
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* connection ended */ }
+        catch (WebSocketException) { /* peer vanished; the receive loop reports it */ }
+        catch (ObjectDisposedException) { /* connection ended */ }
+    }
+
+    /// <summary>Close reply, serialized with the heartbeat's sends.</summary>
+    private static async Task CloseOutputAsync(WebSocket socket, SemaphoreSlim sendLock, WebSocketCloseStatus status, string description)
+    {
+        await sendLock.WaitAsync();
+        try
+        {
+            await socket.CloseOutputAsync(status, description, CancellationToken.None);
+        }
+        finally
+        {
+            sendLock.Release();
+        }
+    }
 
     /// <summary>Notices EndSession during validation-decode without keeping any other state.</summary>
     private sealed class EndSessionDetector : IWireEventSink

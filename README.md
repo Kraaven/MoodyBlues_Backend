@@ -215,6 +215,13 @@ replay format 2: the header grows to 80 bytes and gains a log table (20 bytes pe
 level, colour, text offset and length) followed by a UTF-8 string blob. `SessionCompiler.Version`
 is 2, so sessions compiled earlier have no logs until they are recompiled.
 
+### Stream heartbeat
+
+The server sends a one-byte `KeepAlive` message (event type 30) down every `/stream` connection
+every `MOODYBLUES_STREAM_HEARTBEAT_SECONDS` (default 10). Without it the origin side of the
+connection is silent, and Cloudflare resets such connections after about 60 s even while Unity
+is streaming. The Unity client discards whatever the server sends.
+
 ### Scene optimization pipeline
 
 Every uploaded `.glb` is also queued for a background optimization pass (see
