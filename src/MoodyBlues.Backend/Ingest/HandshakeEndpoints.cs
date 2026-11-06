@@ -87,8 +87,7 @@ public static class HandshakeEndpoints
         string hostAndPort = config.PublicHostAndPort();
         string webSocketUrl = $"{(config.IsHttps ? "wss" : "ws")}://{hostAndPort}/stream?token={token}";
         string? sceneUploadUrl = sceneUploadRequired
-            ? $"{(config.IsHttps ? "https" : "http")}://{hostAndPort}/scenes/{request.SceneId}" +
-              $"?developerId={request.DeveloperId}&sceneHash={request.SceneHash}"
+            ? SceneCheckEndpoints.BuildSceneUploadUrl(config, request.DeveloperId, request.SceneId, request.SceneHash)
             : null;
 
         ConsoleLog.Info(

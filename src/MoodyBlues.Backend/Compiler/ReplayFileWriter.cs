@@ -5,19 +5,21 @@ using System.Text;
 namespace MoodyBlues.Backend.Compiler;
 
 /// <summary>
-/// Writes a compiled session as a MoodyBlues replay file ("MBRP", format version 1). The file is
+/// Writes a compiled session as a MoodyBlues replay file ("MBRP", format version 2). The file is
 /// gzipped on disk and served with <c>Content-Encoding: gzip</c>, so browsers receive the raw
 /// layout below. All values are little-endian and every section starts on a 4-byte boundary so
 /// readers can view float arrays in place.
 ///
 /// <code>
-/// Header (64 bytes)
-///   0  char[4] magic "MBRP"         4  u16 formatVersion (1)      6  u16 flags
+/// Header (80 bytes)
+///   0  char[4] magic "MBRP"         4  u16 formatVersion (2)      6  u16 flags
 ///   8  f64 durationSeconds         16  f32 blockDurationSeconds  20  u32 objectCount
 ///  24  u32 eventCount              28  u32 blockCount            32  u32 objectTableOffset
 ///  36  u32 eventTableOffset        40  u32 blockIndexOffset      44  u32 totalKeyCount
 ///  48  u32 deltaPromotions         52  u32 hardClamps            56  u32 droppedEvents
 ///  60  u8  endReason (255 = none)  61  u8 reserved               62  u16 connectionCount
+///  64  u32 logCount                68  u32 logTableOffset        72  u32 stringDataOffset
+///  76  u32 stringDataLength
 ///   flags: bit0 endedCleanly, bit1 hardClamps &gt; 0, bit2 unknown objects were ignored
 ///
 /// Object table: objectCount x 20 bytes
@@ -27,6 +29,12 @@ namespace MoodyBlues.Backend.Compiler;
 ///
 /// Event table: eventCount x 16 bytes, sorted by time
 ///   f64 time, u8 type, u8 aux, u16 objectId, u16 a, u16 b   (see <see cref="ReplayEventType"/>)
+///
+/// Log table: logCount x 20 bytes, sorted by time
+///   f64 time, u8 level (1 info, 2 warning, 3 error), u8 color (0-63), u16 reserved,
+///   u32 textOffset, u32 textLength   (byte range of UTF-8 text inside the string data)
+///
+/// String data: stringDataLength bytes of UTF-8, padded with zeros to a 4-byte boundary
 ///
 /// Block index: blockCount x 16 bytes
 ///   f64 blockStartTime, u32 byteOffset, u32 byteLength
@@ -46,11 +54,12 @@ namespace MoodyBlues.Backend.Compiler;
 /// </summary>
 public static class ReplayFileWriter
 {
-    public const ushort FormatVersion = 1;
+    public const ushort FormatVersion = 2;
     public const double DefaultBlockDurationSeconds = 60.0;
-    public const int HeaderSize = 64;
+    public const int HeaderSize = 80;
     public const int ObjectEntrySize = 20;
     public const int EventEntrySize = 16;
+    public const int LogEntrySize = 20;
     public const int BlockIndexEntrySize = 16;
 
     public static byte[] Serialize(CompiledReplay replay, double blockDuration = DefaultBlockDurationSeconds)
@@ -73,12 +82,30 @@ public static class ReplayFileWriter
         IReadOnlyList<ReplayObject> objects = replay.Objects;
         List<ReplayEvent> events = replay.Events.OrderBy(e => e.Time).ToList();
 
+        // Stable sort, so logs written in the same tick keep their recorded order.
+        List<ReplayLog> logs = replay.Logs.OrderBy(l => l.Time).ToList();
+        var logTextOffsets = new uint[logs.Count];
+        var logTextLengths = new uint[logs.Count];
+        using var strings = new MemoryStream();
+        for (int i = 0; i < logs.Count; i++)
+        {
+            byte[] text = Encoding.UTF8.GetBytes(logs[i].Text);
+            logTextOffsets[i] = (uint)strings.Length;
+            logTextLengths[i] = (uint)text.Length;
+            strings.Write(text);
+        }
+
+        long stringDataLength = strings.Length;
+        long paddedStringLength = (stringDataLength + 3) & ~3L;
+
         double duration = Math.Max(replay.DurationSeconds, LastKeyTime(objects));
         int blockCount = Math.Max(1, (int)Math.Ceiling(duration / blockDuration));
 
         long objectTableOffset = HeaderSize;
         long eventTableOffset = objectTableOffset + ((long)objects.Count * ObjectEntrySize);
-        long blockIndexOffset = eventTableOffset + ((long)events.Count * EventEntrySize);
+        long logTableOffset = eventTableOffset + ((long)events.Count * EventEntrySize);
+        long stringDataOffset = logTableOffset + ((long)logs.Count * LogEntrySize);
+        long blockIndexOffset = stringDataOffset + paddedStringLength;
         long firstBlockOffset = blockIndexOffset + ((long)blockCount * BlockIndexEntrySize);
 
         // Header
@@ -104,6 +131,10 @@ public static class ReplayFileWriter
         w.Write(replay.EndReason is { } reason ? (byte)reason : (byte)255);
         w.Write((byte)0);
         w.Write((ushort)Math.Min(ushort.MaxValue, replay.ConnectionCount));
+        w.Write((uint)logs.Count);
+        w.Write((uint)logTableOffset);
+        w.Write((uint)stringDataOffset);
+        w.Write((uint)stringDataLength);
 
         // Object table
         foreach (ReplayObject o in objects)
@@ -130,6 +161,25 @@ public static class ReplayFileWriter
             w.Write(e.ObjectId);
             w.Write(e.A);
             w.Write(e.B);
+        }
+
+        // Log table
+        for (int i = 0; i < logs.Count; i++)
+        {
+            ReplayLog log = logs[i];
+            w.Write(log.Time);
+            w.Write(log.Level);
+            w.Write((byte)(log.Color & 0x3F));
+            w.Write((ushort)0);
+            w.Write(logTextOffsets[i]);
+            w.Write(logTextLengths[i]);
+        }
+
+        // String data, padded so the block index stays 4-byte aligned.
+        w.Write(strings.GetBuffer(), 0, (int)stringDataLength);
+        for (long pad = stringDataLength; pad < paddedStringLength; pad++)
+        {
+            w.Write((byte)0);
         }
 
         // Blocks are built in memory first so the index can hold their offsets.

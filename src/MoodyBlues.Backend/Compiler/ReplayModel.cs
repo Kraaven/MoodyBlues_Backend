@@ -42,6 +42,12 @@ public enum ReplayEventType : byte
 
 public readonly record struct ReplayEvent(double Time, ReplayEventType Type, byte Aux, ushort ObjectId, ushort A, ushort B);
 
+/// <summary>
+/// One developer log, reassembled from its Log events (Unity Spec 6.7). <see cref="Level"/> is
+/// 1 info, 2 warning, 3 error; <see cref="Color"/> is the client's 6-bit colour index.
+/// </summary>
+public sealed record ReplayLog(double Time, byte Level, byte Color, string Text);
+
 /// <summary>One object in the compiled replay.</summary>
 public sealed class ReplayObject
 {
@@ -83,6 +89,9 @@ public sealed class CompiledReplay
 
     public IReadOnlyList<ReplayEvent> Events { get; init; } = [];
 
+    /// <summary>Developer logs in the order they were recorded.</summary>
+    public IReadOnlyList<ReplayLog> Logs { get; init; } = [];
+
     public bool EndedCleanly { get; init; }
 
     public Protocol.SessionEndReason? EndReason { get; init; }
@@ -97,7 +106,7 @@ public sealed class CompiledReplay
 
     public uint DroppedEvents { get; init; }
 
-    /// <summary>Transform events for IDs that are neither in the scene nor spawned (e.g. spawned before the handshake).</summary>
+    /// <summary>Transform events for IDs that are neither in the scene nor spawned.</summary>
     public long UnknownObjectEvents { get; init; }
 
     public int SpawnCount { get; init; }

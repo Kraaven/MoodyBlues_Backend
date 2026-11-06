@@ -96,6 +96,7 @@ app.MapGet("/health", async (MoodyBluesDbContext db) =>
     await db.Database.CanConnectAsync() ? Results.Ok(new { status = "ok" }) : Results.StatusCode(503));
 
 HandshakeEndpoints.Map(app);
+SceneCheckEndpoints.Map(app);
 StreamServer.Map(app);
 SceneUploadEndpoints.Map(app);
 AuthEndpoints.Map(app);

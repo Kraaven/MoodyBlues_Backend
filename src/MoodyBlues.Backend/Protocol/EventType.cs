@@ -44,6 +44,9 @@ public enum EventType : byte
     KeepAlive = 30,
     EndSession = 31,
     ReparentObject = 32,
+
+    // Developer log (Spec 6.7). No envelope; fixed 35 bytes.
+    Log = 33,
 }
 
 /// <summary>Why a session ended, carried in <c>EndSession</c> (Spec 6.1).</summary>

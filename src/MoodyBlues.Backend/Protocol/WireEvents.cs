@@ -63,6 +63,13 @@ public interface IWireEventSink
     void OnReparent(ushort objectId, ushort newParentObjectId, Vector3 position, Quaternion rotation, Vector3 scale);
 
     void OnTransform(ushort objectId, in TransformUpdate update);
+
+    /// <summary>
+    /// One Log event (Spec 6.7). <paramref name="style"/> holds the level in its top 2 bits (0
+    /// means "continues the previous log") and the colour in its low 6 bits.
+    /// <paramref name="utf8Text"/> is this event's share of the text, already cut at the padding.
+    /// </summary>
+    void OnLog(byte style, ReadOnlySpan<byte> utf8Text);
 }
 
 /// <summary>A sink that ignores everything; used when only validation is needed.</summary>
@@ -80,4 +87,5 @@ public sealed class NullWireEventSink : IWireEventSink
     public void OnInstantiate(ushort objectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
     public void OnReparent(ushort objectId, ushort newParentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
     public void OnTransform(ushort objectId, in TransformUpdate update) { }
+    public void OnLog(byte style, ReadOnlySpan<byte> utf8Text) { }
 }

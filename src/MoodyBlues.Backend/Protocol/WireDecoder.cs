@@ -56,10 +56,11 @@ public sealed class WireDecoder
             if (type == (byte)EventType.BeginSession)
             {
                 ushort version = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2));
-                if (version != ProtocolConstants.ProtocolVersion)
+                if (version < ProtocolConstants.MinProtocolVersion || version > ProtocolConstants.ProtocolVersion)
                 {
                     throw new ProtocolException(
-                        $"Unsupported protocol version {version}; this server implements {ProtocolConstants.ProtocolVersion}.");
+                        $"Unsupported protocol version {version}; this server implements " +
+                        $"{ProtocolConstants.MinProtocolVersion}-{ProtocolConstants.ProtocolVersion}.");
                 }
 
                 WireRanges ranges = ReadRanges(message.Slice(offset + 7, 28));
@@ -106,6 +107,7 @@ public sealed class WireDecoder
         (byte)EventType.BeginSession => ProtocolConstants.BeginSessionSize,
         (byte)EventType.KeepAlive => ProtocolConstants.KeepAliveSize,
         (byte)EventType.EndSession => ProtocolConstants.EndSessionSize,
+        (byte)EventType.Log => ProtocolConstants.LogSize,
         _ when ProtocolConstants.TryGetPayloadSize(type, out int payload) => ProtocolConstants.EnvelopeSize + payload,
         _ => throw new ProtocolException($"Unknown event type {type} at offset {offset}."),
     };
@@ -159,6 +161,15 @@ public sealed class WireDecoder
                         BinaryPrimitives.ReadUInt32LittleEndian(evt[10..]),
                         BinaryPrimitives.ReadUInt32LittleEndian(evt[14..])));
                     continue;
+
+                case EventType.Log:
+                {
+                    // Text is zero-padded; it ends at the first zero byte.
+                    ReadOnlySpan<byte> text = evt.Slice(2, ProtocolConstants.LogTextBytes);
+                    int end = text.IndexOf((byte)0);
+                    sink.OnLog(evt[1], end < 0 ? text : text[..end]);
+                    continue;
+                }
             }
 
             ushort objectId = BinaryPrimitives.ReadUInt16LittleEndian(evt[1..]);

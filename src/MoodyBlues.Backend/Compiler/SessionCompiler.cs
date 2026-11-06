@@ -11,7 +11,7 @@ namespace MoodyBlues.Backend.Compiler;
 public static class SessionCompiler
 {
     /// <summary>Bump when the compiler's output changes meaningfully; stored on each session.</summary>
-    public const int Version = 1;
+    public const int Version = 2;
 
     public static async Task<CompiledReplay> CompileAsync(
         string rawLogFullPath,

@@ -187,6 +187,34 @@ are auto-provisioned on first sight (no registration/auth yet -- see `Data/Devel
 `sceneHash` is stored and compared as an opaque string; the backend does not independently
 recompute it from the uploaded scene file this milestone.
 
+### `POST /scenes/check`
+
+Called by Unity's `SendScene` to find out whether a scene revision needs uploading, without
+starting a session. Same validation, developer auto-provisioning and `Ingest` rate limit as
+`/handshake`.
+
+```json
+{ "developerId": "string", "sceneId": "string", "sceneHash": "string" }
+```
+
+->
+
+```json
+{ "sceneUploadRequired": true, "sceneUploadUrl": "http://host:port/scenes/{sceneId}?developerId=...&sceneHash=..." }
+```
+
+`sceneUploadUrl` is present only when `sceneUploadRequired` is `true`, and is built exactly as the
+handshake builds it (`Ingest/SceneCheckEndpoints.cs`).
+
+### Protocol v2 and replay format v2
+
+The stream decoder accepts protocol versions 1 and 2. Version 2 adds the `Log` event (id 33,
+Unity Spec 6.7). `Compiler/SessionReconstructor.cs` reassembles each log from its events (a
+non-zero level starts a log, level 0 appends) and `Compiler/ReplayFileWriter.cs` writes them into
+replay format 2: the header grows to 80 bytes and gains a log table (20 bytes per log: time,
+level, colour, text offset and length) followed by a UTF-8 string blob. `SessionCompiler.Version`
+is 2, so sessions compiled earlier have no logs until they are recompiled.
+
 ### Scene optimization pipeline
 
 Every uploaded `.glb` is also queued for a background optimization pass (see

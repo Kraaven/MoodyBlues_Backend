@@ -38,6 +38,8 @@ public class WireDecoderTests
             Transforms.Add((objectId, update));
             Log.Add($"transform {objectId}");
         }
+
+        public void OnLog(byte style, ReadOnlySpan<byte> utf8Text) => Log.Add($"log {style}");
     }
 
     [Fact]
@@ -68,7 +70,7 @@ public class WireDecoderTests
     [Fact]
     public void UnsupportedProtocolVersion_IsRejected()
     {
-        byte[] msg = new WireBuilder().BeginSession(version: 2).Build();
+        byte[] msg = new WireBuilder().BeginSession(version: ProtocolConstants.ProtocolVersion + 1).Build();
         var ex = Assert.Throws<ProtocolException>(() => new WireDecoder().DecodeMessage(msg, new RecordingSink()));
         Assert.Contains("version", ex.Message);
     }

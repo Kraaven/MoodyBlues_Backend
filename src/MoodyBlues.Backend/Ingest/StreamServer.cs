@@ -264,5 +264,6 @@ public sealed class StreamServer(
         public void OnInstantiate(ushort objectId, ushort templateObjectId, ushort parentObjectId, System.Numerics.Vector3 position, System.Numerics.Quaternion rotation, System.Numerics.Vector3 scale) { }
         public void OnReparent(ushort objectId, ushort newParentObjectId, System.Numerics.Vector3 position, System.Numerics.Quaternion rotation, System.Numerics.Vector3 scale) { }
         public void OnTransform(ushort objectId, in TransformUpdate update) { }
+        public void OnLog(byte style, ReadOnlySpan<byte> utf8Text) { }
     }
 }

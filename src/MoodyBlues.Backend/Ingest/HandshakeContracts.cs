@@ -8,3 +8,12 @@ public sealed record HandshakeRequest(string DeveloperId, string SceneId, string
 
 /// <summary>Response of <c>POST /handshake</c>. <c>webSocketUrl</c> is opaque to the client.</summary>
 public sealed record HandshakeResponse(string WebSocketUrl, bool SceneUploadRequired, string? SceneUploadUrl);
+
+/// <summary>
+/// Body of <c>POST /scenes/check</c> (Unity Spec 13). Field names must match the Unity client's
+/// <c>SceneCheckRequest</c>.
+/// </summary>
+public sealed record SceneCheckRequest(string DeveloperId, string SceneId, string SceneHash);
+
+/// <summary>Response of <c>POST /scenes/check</c>. <c>sceneUploadUrl</c> is set only when an upload is needed.</summary>
+public sealed record SceneCheckResponse(bool SceneUploadRequired, string? SceneUploadUrl);

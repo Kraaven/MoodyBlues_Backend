@@ -7,8 +7,14 @@ namespace MoodyBlues.Backend.Protocol;
 /// </summary>
 public static class ProtocolConstants
 {
-    /// <summary>The only protocol version this decoder implements (Spec 6.1, BeginSession).</summary>
-    public const ushort ProtocolVersion = 1;
+    /// <summary>Newest protocol version this decoder implements (Spec 6.1, BeginSession).</summary>
+    public const ushort ProtocolVersion = 2;
+
+    /// <summary>
+    /// Oldest version still accepted. Version 2 only added the Log event, so a version-1 stream
+    /// decodes unchanged.
+    /// </summary>
+    public const ushort MinProtocolVersion = 1;
 
     /// <summary>EventType + ObjectID, carried by every event except the session maintenance ones.</summary>
     public const int EnvelopeSize = 3;
@@ -18,7 +24,13 @@ public static class ProtocolConstants
     public const int KeepAliveSize = 1;
     public const int EndSessionSize = 18;
 
-    /// <summary>Largest single event (BeginSession).</summary>
+    /// <summary>UTF-8 text bytes carried by one Log event (zero-padded).</summary>
+    public const int LogTextBytes = 33;
+
+    /// <summary>type + style + text.</summary>
+    public const int LogSize = 2 + LogTextBytes;
+
+    /// <summary>Largest single event (BeginSession and Log are both 35 bytes).</summary>
     public const int MaxEventSize = BeginSessionSize;
 
     /// <summary>Absolute rotations use smallest-three over +/- 1/sqrt(2). Not tunable (Spec 9.5).</summary>

@@ -87,6 +87,15 @@ public sealed class SessionReconstructor : IWireEventSink
     private long _unknownObjectEvents;
     private int _spawnCount;
 
+    // Log reassembly (Spec 6.7): a Log event with a non-zero level starts a log, level 0 appends.
+    private const int MaxLogBytes = 64 * 1024;
+    private readonly List<ReplayLog> _logs = [];
+    private readonly List<byte> _pendingLogText = [];
+    private bool _hasPendingLog;
+    private double _pendingLogTime;
+    private byte _pendingLogLevel;
+    private byte _pendingLogColor;
+
     public SessionReconstructor(SceneRegistry registry, FitTolerances? tolerances = null)
     {
         _registry = registry.ToDictionary();
@@ -160,6 +169,7 @@ public sealed class SessionReconstructor : IWireEventSink
                 break;
 
             case RawLogRecordKind.ConnectionClosed:
+                FlushPendingLog();
                 AddMarker(ReplayEventType.Disconnected, record.Payload.Length > 0 ? record.Payload.Span[0] : (byte)0, 0);
                 _decoder = null;
                 break;
@@ -168,6 +178,8 @@ public sealed class SessionReconstructor : IWireEventSink
 
     public CompiledReplay Finish()
     {
+        FlushPendingLog();
+
         var objects = new List<ReplayObject>();
         foreach (ObjectState o in _objects.Values.OrderBy(o => o.Id))
         {
@@ -199,6 +211,7 @@ public sealed class SessionReconstructor : IWireEventSink
             DurationSeconds = _maxTime,
             Objects = objects,
             Events = _events,
+            Logs = _logs,
             EndedCleanly = _endedCleanly,
             EndReason = _endReason,
             ConnectionCount = _connectionCount,
@@ -381,6 +394,38 @@ public sealed class SessionReconstructor : IWireEventSink
         }
 
         Sample(o, update.Fields, discontinuity: false);
+    }
+
+    public void OnLog(byte style, ReadOnlySpan<byte> utf8Text)
+    {
+        _rawEventCount++;
+        byte level = (byte)(style >> 6);
+
+        if (level != 0 || !_hasPendingLog)
+        {
+            // A continuation with nothing to continue (its first event was dropped on the client)
+            // still carries text worth keeping, so it becomes a plain info log.
+            FlushPendingLog();
+            _hasPendingLog = true;
+            _pendingLogTime = _now;
+            _pendingLogLevel = level != 0 ? level : (byte)1;
+            _pendingLogColor = level != 0 ? (byte)(style & 0x3F) : (byte)0;
+        }
+
+        int room = MaxLogBytes - _pendingLogText.Count;
+        if (room <= 0) return;
+        if (utf8Text.Length > room) utf8Text = utf8Text[..room];
+        foreach (byte b in utf8Text) _pendingLogText.Add(b);
+    }
+
+    private void FlushPendingLog()
+    {
+        if (!_hasPendingLog) return;
+
+        string text = System.Text.Encoding.UTF8.GetString(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pendingLogText));
+        _logs.Add(new ReplayLog(_pendingLogTime, _pendingLogLevel, _pendingLogColor, text));
+        _pendingLogText.Clear();
+        _hasPendingLog = false;
     }
 
     // ---- internals ----------------------------------------------------------------------------
