@@ -1,4 +1,4 @@
 namespace MoodyBlues.Backend.Protocol;
 
-/// <summary>Raised when a message can't be decoded per Spec.md.</summary>
+/// <summary>Thrown when a wire message cannot be decoded (unknown type, truncation, version mismatch).</summary>
 public sealed class ProtocolException(string message) : Exception(message);

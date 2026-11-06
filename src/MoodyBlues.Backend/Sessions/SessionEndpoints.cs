@@ -1,19 +1,17 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
-using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Sessions;
 
 /// <summary>
-/// Dashboard-facing session (recorded-playback) operations. Every route requires a valid JWT and
-/// checks that the caller owns the <see cref="Data.Project"/> that the session's
-/// <c>developerId</c> belongs to -- same ownership pattern as <see cref="Scenes.SceneEndpoints"/>.
+/// Dashboard session operations. Every route needs a JWT and checks the caller owns the project
+/// the session's developerId belongs to (404 otherwise).
 /// </summary>
 public static class SessionEndpoints
 {
@@ -23,19 +21,14 @@ public static class SessionEndpoints
             .RequireAuthorization()
             .MapGet("/sessions", ListAsync);
 
-        var sessionGroup = app.MapGroup("/api/sessions/{sessionId}").RequireAuthorization();
-        sessionGroup.MapGet("/", GetAsync);
-        sessionGroup.MapGet("/animation", DownloadAnimationAsync);
-        sessionGroup.MapGet("/events", DownloadEventsAsync);
-        sessionGroup.MapDelete("/", DeleteAsync);
+        var group = app.MapGroup("/api/sessions/{sessionId}").RequireAuthorization();
+        group.MapGet("/", GetAsync);
+        group.MapGet("/replay", DownloadReplayAsync);
+        group.MapPost("/recompile", RecompileAsync);
+        group.MapDelete("/", DeleteAsync);
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
-    public static async Task<IResult> ListAsync(
-        string developerId,
-        string sceneId,
-        ClaimsPrincipal principal,
-        MoodyBluesDbContext db)
+    public static async Task<IResult> ListAsync(string developerId, string sceneId, ClaimsPrincipal principal, MoodyBluesDbContext db)
     {
         if (!CurrentUser.TryGetUserId(principal, out Guid userId))
         {
@@ -44,155 +37,127 @@ public static class SessionEndpoints
 
         if (!PathSegments.IsSafe(developerId) || !PathSegments.IsSafe(sceneId))
         {
-            return Results.BadRequest("developerId and sceneId must not contain path separators.");
+            return Results.BadRequest("Invalid developerId or sceneId.");
         }
 
-        bool owns = await db.Projects.AnyAsync(p => p.DeveloperId == developerId && p.UserId == userId);
-        if (!owns)
+        if (!await db.Projects.AnyAsync(p => p.DeveloperId == developerId && p.UserId == userId))
         {
             return Results.NotFound();
         }
 
-        var sessions = await db.Sessions
+        List<SessionSummaryResponse> sessions = await db.Sessions
             .Where(s => s.DeveloperId == developerId && s.SceneId == sceneId)
             .OrderByDescending(s => s.CreatedAtUtc)
-            .Select(ToSummary)
+            .Select(s => new SessionSummaryResponse(
+                s.Id, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.Status, s.EndedCleanly, s.DurationSeconds,
+                s.ObjectCount, s.SpawnCount, s.KeyframeCount, s.ReplaySizeBytes, s.RawLogSizeBytes))
             .ToListAsync();
 
         return Results.Ok(sessions);
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
     public static async Task<IResult> GetAsync(string sessionId, ClaimsPrincipal principal, MoodyBluesDbContext db)
     {
-        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        (IResult? error, Session? s) = await CheckOwnershipAsync(sessionId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
         return Results.Ok(new SessionDetailResponse(
-            session!.Id,
-            session.DeveloperId,
-            session.SceneId,
-            session.SceneHash,
-            session.CreatedAtUtc,
-            session.DurationSeconds,
-            session.RawEventCount,
-            session.KeyframeCount,
-            session.ObjectCount,
-            session.AnimationSizeBytes,
-            session.EventLogSizeBytes,
-            session.Status,
-            session.ErrorMessage));
+            s!.Id, s.DeveloperId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
+            s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.RawEventCount, s.KeyframeCount,
+            s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents,
+            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage));
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
-    public static async Task<IResult> DownloadAnimationAsync(
+    /// <summary>
+    /// The compiled replay file. Stored gzipped and sent with <c>Content-Encoding: gzip</c>, so the
+    /// browser hands the viewer the uncompressed bytes.
+    /// </summary>
+    public static async Task<IResult> DownloadReplayAsync(
         string sessionId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
-        ServerConfig config,
+        StoragePaths paths,
         HttpContext httpContext)
     {
-        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
-        if (session!.Status != SessionStatus.Ready || session.AnimationPath is null)
+        if (session!.Status != SessionStatus.Ready || session.ReplayPath is null)
         {
-            return Results.NotFound("Animation is not ready yet.");
+            return Results.NotFound("The replay is not ready yet.");
         }
 
-        string fullPath = Path.Combine(config.SessionsDir, session.AnimationPath);
+        string fullPath = paths.SessionFull(session.ReplayPath);
         if (!File.Exists(fullPath))
         {
-            return Results.NotFound("Animation file is not on disk.");
+            return Results.NotFound("The replay file is not on disk.");
         }
 
-        // The file on disk is gzipped JSON; setting Content-Encoding lets fetch()/the browser
-        // transparently decompress it, same as any other gzip-compressed HTTP response.
         httpContext.Response.Headers.ContentEncoding = "gzip";
-
-        // See SceneEndpoints.DownloadAsync for why this must be an absolute path (Results.File
-        // otherwise resolves relative paths against a nonexistent wwwroot).
-        return Results.File(Path.GetFullPath(fullPath), contentType: "application/json", fileDownloadName: $"{session.Id}.json");
+        httpContext.Response.Headers.CacheControl = "private, no-cache";
+        return Results.File(fullPath, "application/octet-stream", $"{session.Id:N}.mbr");
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
-    public static async Task<IResult> DownloadEventsAsync(
+    /// <summary>Rebuilds the replay from the raw log, e.g. after a compiler improvement.</summary>
+    public static async Task<IResult> RecompileAsync(
         string sessionId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
-        ServerConfig config,
-        HttpContext httpContext)
+        CompileWorkSignal signal)
     {
-        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
-        if (session!.Status != SessionStatus.Ready || session.EventLogPath is null)
+        if (session!.Status is SessionStatus.Recording or SessionStatus.Compiling or SessionStatus.Queued)
         {
-            return Results.NotFound("Event log is not ready yet.");
+            return Results.Conflict("The session is still recording or already waiting to compile.");
         }
 
-        string fullPath = Path.Combine(config.SessionsDir, session.EventLogPath);
-        if (!File.Exists(fullPath))
-        {
-            return Results.NotFound("Event log file is not on disk.");
-        }
-
-        // The file on disk is gzipped binary; Content-Encoding lets fetch() decompress transparently.
-        httpContext.Response.Headers.ContentEncoding = "gzip";
-
-        return Results.File(
-            Path.GetFullPath(fullPath),
-            contentType: "application/octet-stream",
-            fileDownloadName: $"{session.Id}.events.bin");
+        session.Status = SessionStatus.Queued;
+        session.ErrorMessage = null;
+        await db.SaveChangesAsync();
+        signal.Signal.Notify();
+        return Results.Accepted();
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
     public static async Task<IResult> DeleteAsync(
         string sessionId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
-        ServerConfig config)
+        StoragePaths paths)
     {
-        (IResult? error, Data.Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
-        if (session!.AnimationPath is not null)
+        if (session!.Status is SessionStatus.Recording or SessionStatus.Compiling)
         {
-            string fullPath = Path.Combine(config.SessionsDir, session.AnimationPath);
-            if (File.Exists(fullPath))
-            {
-                File.Delete(fullPath);
-            }
+            return Results.Conflict("The session is still recording or compiling.");
         }
 
-        if (session.EventLogPath is not null)
+        string dir = paths.SessionFull(StoragePaths.SessionDir(session.DeveloperId, session.Id));
+        if (Directory.Exists(dir))
         {
-            string eventsPath = Path.Combine(config.SessionsDir, session.EventLogPath);
-            if (File.Exists(eventsPath))
-            {
-                File.Delete(eventsPath);
-            }
+            Directory.Delete(dir, recursive: true);
         }
 
         db.Sessions.Remove(session);
         await db.SaveChangesAsync();
-
         return Results.NoContent();
     }
 
-    private static async Task<(IResult? Error, Data.Session? Session)> CheckOwnershipAsync(
+    private static async Task<(IResult? Error, Session? Session)> CheckOwnershipAsync(
         string sessionId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
@@ -207,31 +172,12 @@ public static class SessionEndpoints
             return (Results.NotFound(), null);
         }
 
-        Data.Session? session = await db.Sessions.FindAsync(id);
-        if (session is null)
-        {
-            return (Results.NotFound(), null);
-        }
-
-        bool owns = await db.Projects.AnyAsync(p => p.DeveloperId == session.DeveloperId && p.UserId == userId);
-        if (!owns)
+        Session? session = await db.Sessions.FindAsync(id);
+        if (session is null || !await db.Projects.AnyAsync(p => p.DeveloperId == session.DeveloperId && p.UserId == userId))
         {
             return (Results.NotFound(), null);
         }
 
         return (null, session);
     }
-
-    private static readonly System.Linq.Expressions.Expression<Func<Data.Session, SessionSummaryResponse>> ToSummary =
-        s => new SessionSummaryResponse(
-            s.Id,
-            s.SceneId,
-            s.CreatedAtUtc,
-            s.DurationSeconds,
-            s.RawEventCount,
-            s.KeyframeCount,
-            s.ObjectCount,
-            s.AnimationSizeBytes,
-            s.EventLogSizeBytes,
-            s.Status);
 }

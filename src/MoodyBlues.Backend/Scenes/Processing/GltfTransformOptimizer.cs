@@ -5,13 +5,40 @@ using MoodyBlues.Backend.Logging;
 namespace MoodyBlues.Backend.Scenes.Processing;
 
 /// <summary>
-/// Shells out to <c>gltf-transform optimize</c> (see <see cref="ServerConfig.GltfTransformCommand"/>,
-/// installed globally via npm in the Docker image -- see Dockerfile). Draco-compresses geometry and
-/// converts textures to KTX2 (via KTX-Software's <c>toktx</c>, also installed in the image), matching
-/// the DRACOLoader/KTX2Loader the frontend's <c>loadScene.ts</c> already wires up.
+/// Runs <c>gltf-transform optimize</c> (version pinned in the Dockerfile) to make an uploaded scene
+/// smaller for the dashboard: Draco geometry and KTX2 textures, matching the decoders the
+/// frontend registers in <c>loadScene.ts</c>.
+///
+/// Every step that would change the node hierarchy is switched off, because replays address
+/// nodes through <c>extras.objectId</c> and animate them individually:
+/// <list type="bullet">
+/// <item><c>--instance false</c>: GPU instancing moves meshes off their nodes into one static batch
+///   (for any mesh used 5+ times) and deletes the emptied nodes.</item>
+/// <item><c>--prune false</c>: pruning deletes empty leaf nodes, which tracked empty GameObjects are.</item>
+/// <item><c>--flatten false</c>, <c>--join false</c>: both destroy the hierarchy.</item>
+/// <item><c>--palette false</c>, <c>--simplify false</c>: keep materials and geometry as authored,
+///   since the inspector shows them.</item>
+/// </list>
+/// The process has a timeout so one pathological upload cannot stall the queue forever.
 /// </summary>
 public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
 {
+    private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(15);
+
+    public static IReadOnlyList<string> BuildArguments(string inputPath, string outputPath) =>
+    [
+        "optimize", inputPath, outputPath,
+        "--compress", "draco",
+        "--texture-compress", "ktx2",
+        "--texture-size", "2048",
+        "--instance", "false",
+        "--prune", "false",
+        "--flatten", "false",
+        "--join", "false",
+        "--palette", "false",
+        "--simplify", "false",
+    ];
+
     public async Task<bool> OptimizeAsync(string inputPath, string outputPath, CancellationToken cancellationToken)
     {
         if (!File.Exists(inputPath))
@@ -27,48 +54,45 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        startInfo.ArgumentList.Add("optimize");
-        startInfo.ArgumentList.Add(inputPath);
-        startInfo.ArgumentList.Add(outputPath);
-        startInfo.ArgumentList.Add("--compress");
-        startInfo.ArgumentList.Add("draco");
-        startInfo.ArgumentList.Add("--texture-compress");
-        startInfo.ArgumentList.Add("ktx2");
-        startInfo.ArgumentList.Add("--texture-size");
-        startInfo.ArgumentList.Add("2048");
-        startInfo.ArgumentList.Add("--flatten");
-        startInfo.ArgumentList.Add("false");
-        startInfo.ArgumentList.Add("--join");
-        startInfo.ArgumentList.Add("false");
-        startInfo.ArgumentList.Add("--dedup");
-        startInfo.ArgumentList.Add("false");
+        foreach (string arg in BuildArguments(inputPath, outputPath))
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(Timeout);
 
         try
         {
             using var process = new Process { StartInfo = startInfo };
             process.Start();
 
-            Task<string> stdOutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            Task<string> stdErrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-
-            string stdOut = await stdOutTask;
-            string stdErr = await stdErrTask;
+            Task<string> stdOut = process.StandardOutput.ReadToEndAsync(timeout.Token);
+            Task<string> stdErr = process.StandardError.ReadToEndAsync(timeout.Token);
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                process.Kill(entireProcessTree: true);
+                ConsoleLog.Error($"Scene processing: gltf-transform timed out after {Timeout.TotalMinutes} min for {inputPath}.");
+                return false;
+            }
 
             if (process.ExitCode != 0)
             {
                 ConsoleLog.Error(
                     $"Scene processing: gltf-transform exited {process.ExitCode} for {inputPath}."
-                    + $"{Environment.NewLine}stdout: {stdOut}{Environment.NewLine}stderr: {stdErr}");
+                    + $"{Environment.NewLine}stdout: {await stdOut}{Environment.NewLine}stderr: {await stdErr}");
                 return false;
             }
 
-            ConsoleLog.Debug($"Scene processing: gltf-transform output for {inputPath}:{Environment.NewLine}{stdOut}");
-            return true;
+            return File.Exists(outputPath) && new FileInfo(outputPath).Length > 0;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ConsoleLog.Error($"Scene processing: failed to launch gltf-transform for {inputPath}.", ex);
+            ConsoleLog.Error($"Scene processing: failed to run gltf-transform for {inputPath}.", ex);
             return false;
         }
     }

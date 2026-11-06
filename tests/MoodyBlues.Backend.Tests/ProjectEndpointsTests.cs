@@ -72,11 +72,19 @@ public class ProjectEndpointsTests
         {
             DeveloperId = created!.DeveloperId,
             SceneId = "scene-1",
-            Hash = "hash",
-            RawGlbPath = $"{created.DeveloperId}/scene-1.glb",
-            RawSizeBytes = 2048,
+            LatestHash = new string('a', 64),
             DisplayName = "Renamed Scene",
+            CreatedAtUtc = DateTime.UtcNow,
             UpdatedAtUtc = DateTime.UtcNow,
+        });
+        db.SceneRevisions.Add(new SceneRevision
+        {
+            DeveloperId = created.DeveloperId,
+            SceneId = "scene-1",
+            Hash = new string('a', 64),
+            RawGlbPath = "raw.glb",
+            RawSizeBytes = 2048,
+            CreatedAtUtc = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();
 

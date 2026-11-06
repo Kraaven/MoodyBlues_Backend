@@ -1,11 +1,13 @@
 namespace MoodyBlues.Backend.Protocol;
 
 /// <summary>
-/// Wire event type byte values (Spec.md Section 5).
+/// Wire event type byte values. Mirrors <c>Serializer.EventType</c> in the Unity client and
+/// Section 6 of the Unity repo's Spec.md. 0 is never a valid type (it is the client ring buffer's
+/// padding marker and never reaches the wire).
 /// </summary>
 public enum EventType : byte
 {
-    // 5.2 Single-property events
+    // Single-property transform events (Spec 6.3)
     TruePosition = 1,
     TrueRotation = 2,
     TrueRotationSingleAxis = 3,
@@ -17,7 +19,7 @@ public enum EventType : byte
     DeltaScale = 9,
     DeltaUniformScale = 10,
 
-    // 5.3 Combined "hot path" events
+    // Combined transform events (Spec 6.4)
     TrueTransform = 11,
     TruePositionRotation = 12,
     TrueRotationScale = 13,
@@ -32,10 +34,23 @@ public enum EventType : byte
     DeltaPositionUniformScale = 22,
     DeltaRotationUniformScale = 23,
 
-    // 5.1 Session / lifecycle events
+    // Stream / lifecycle events (Spec 6.1, 6.2)
     TimeStamp = 24,
     ShowObject = 25,
     HideObject = 26,
     InstantiateObject = 27,
     DeleteObject = 28,
+    BeginSession = 29,
+    KeepAlive = 30,
+    EndSession = 31,
+    ReparentObject = 32,
+}
+
+/// <summary>Why a session ended, carried in <c>EndSession</c> (Spec 6.1).</summary>
+public enum SessionEndReason : byte
+{
+    StoppedByHost = 0,
+    ApplicationQuit = 1,
+    SceneUnloaded = 2,
+    ClientError = 3,
 }

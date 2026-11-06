@@ -11,7 +11,10 @@ out/
 logs/
 *.log
 
+# Runtime data (ServerConfig defaults: data/scenes, data/sessions)
+data/
 /scenes/
+/sessions/
 
 .env
 

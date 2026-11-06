@@ -1,33 +1,29 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
-using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Scenes;
 
 /// <summary>
-/// Dashboard-facing scene operations -- <c>/api/scenes/{developerId}/{sceneId}</c>. Separate from
-/// the Unity-facing <see cref="SceneUploadEndpoints"/> (which stays unauthenticated). Every route
-/// here requires a valid JWT and checks that the caller owns the <see cref="Data.Project"/> that
-/// <c>developerId</c> belongs to.
+/// Dashboard scene operations under <c>/api/scenes/{developerId}/{sceneId}</c>. Every route needs
+/// a JWT and checks the caller owns the project that <c>developerId</c> belongs to; non-owners
+/// get 404 so scene existence is not revealed.
 /// </summary>
 public static class SceneEndpoints
 {
     public static void Map(WebApplication app)
     {
         var group = app.MapGroup("/api/scenes/{developerId}/{sceneId}").RequireAuthorization();
-
         group.MapPatch("/", RenameAsync);
         group.MapGet("/file", DownloadAsync);
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
     public static async Task<IResult> RenameAsync(
         string developerId,
         string sceneId,
@@ -35,60 +31,84 @@ public static class SceneEndpoints
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
     {
-        (IResult? authError, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
-        if (authError is not null)
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
         {
-            return authError;
+            return error;
         }
 
         string? displayName = request.DisplayName?.Trim();
-        scene!.DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName;
+        scene!.DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName[..Math.Min(displayName.Length, 200)];
         await db.SaveChangesAsync();
 
-        return Results.Ok(new SceneResponse(scene.SceneId, scene.DisplayName, scene.UpdatedAtUtc, scene.ServableSizeBytes, scene.ProcessingStatus));
+        return Results.Ok(await ToResponseAsync(scene, db));
     }
 
-    /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
+    /// <summary>
+    /// Serves a scene revision's GLB: <c>?hash=</c> selects a revision (sessions pass the hash
+    /// they were recorded with), otherwise the latest. The optimized file is preferred once it
+    /// exists; the raw upload is the fallback. Revisions never change, so the response is cacheable.
+    /// </summary>
     public static async Task<IResult> DownloadAsync(
         string developerId,
         string sceneId,
+        string? hash,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
-        ServerConfig config)
+        StoragePaths paths,
+        HttpContext httpContext)
     {
-        (IResult? authError, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
-        if (authError is not null)
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
         {
-            return authError;
+            return error;
         }
 
-        // Prefer the optimized (Draco/KTX2) output once the background pass has finished; fall back to
-        // the raw upload otherwise -- viewing a scene should never block on/fail because of optimization.
-        // Also falls back if the DB says "Ready" but the file isn't actually on disk (e.g. a volume
-        // wiped between passes) -- the raw upload is the one file that's always guaranteed to exist.
-        string? optimizedFullPath = scene!.ProcessingStatus == SceneProcessingStatus.Ready && scene.OptimizedGlbPath is not null
-            ? Path.Combine(config.ScenesDir, scene.OptimizedGlbPath)
-            : null;
+        string revisionHash = string.IsNullOrEmpty(hash) ? scene!.LatestHash : hash;
+        if (!PathSegments.IsSceneHash(revisionHash))
+        {
+            return Results.BadRequest("hash must be 64 lowercase hex characters.");
+        }
 
-        string fullPath = optimizedFullPath is not null && File.Exists(optimizedFullPath)
-            ? optimizedFullPath
-            : Path.Combine(config.ScenesDir, scene.RawGlbPath);
+        SceneRevision? revision = await db.SceneRevisions.FindAsync(developerId, sceneId, revisionHash);
+        if (revision is null)
+        {
+            return Results.NotFound("That scene revision was never uploaded.");
+        }
+
+        string? optimized = revision is { Status: SceneProcessingStatus.Ready, OptimizedGlbPath: not null }
+            ? paths.SceneFull(revision.OptimizedGlbPath)
+            : null;
+        string fullPath = optimized is not null && File.Exists(optimized) ? optimized : paths.SceneFull(revision.RawGlbPath);
 
         if (!File.Exists(fullPath))
         {
-            ConsoleLog.Error(
-                $"Scene download: file missing on disk for developer={developerId} scene={sceneId} "
-                + $"status={scene.ProcessingStatus} expectedPath={fullPath}");
+            ConsoleLog.Error($"Scene download: file missing on disk for {developerId}/{sceneId}/{revisionHash}: {fullPath}");
             return Results.NotFound("Scene file is not on disk.");
         }
 
-        // Results.File(string) treats a relative path as "virtual" and resolves it against
-        // IWebHostEnvironment.WebRootFileProvider (i.e. a wwwroot/ folder, which this API doesn't have)
-        // instead of the process's working directory -- so with ScenesDir left relative (the default,
-        // "scenes"), this always 500ed with FileNotFoundException even though File.Exists() above (which
-        // *does* resolve relative to the working directory) found it just fine. Passing an absolute path
-        // makes Results.File use the direct-disk PhysicalFileHttpResult instead.
-        return Results.File(Path.GetFullPath(fullPath), contentType: "model/gltf-binary", fileDownloadName: $"{scene.SceneId}.glb", enableRangeProcessing: true);
+        // Only cache once the optimized file is being served; before that the response changes.
+        if (optimized is not null && fullPath == optimized)
+        {
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+
+        // Results.File needs an absolute path (a relative one is resolved against wwwroot).
+        return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
+    }
+
+    internal static async Task<SceneResponse> ToResponseAsync(Scene scene, MoodyBluesDbContext db)
+    {
+        SceneRevision? latest = await db.SceneRevisions.FindAsync(scene.DeveloperId, scene.SceneId, scene.LatestHash);
+        int revisionCount = await db.SceneRevisions.CountAsync(r => r.DeveloperId == scene.DeveloperId && r.SceneId == scene.SceneId);
+        return new SceneResponse(
+            scene.SceneId,
+            scene.DisplayName,
+            scene.UpdatedAtUtc,
+            scene.LatestHash,
+            latest?.ServableSizeBytes ?? 0,
+            latest?.Status ?? SceneProcessingStatus.Pending,
+            revisionCount);
     }
 
     private static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(
@@ -104,7 +124,7 @@ public static class SceneEndpoints
 
         if (!PathSegments.IsSafe(developerId) || !PathSegments.IsSafe(sceneId))
         {
-            return (Results.BadRequest("developerId and sceneId must not contain path separators."), null);
+            return (Results.BadRequest("Invalid developerId or sceneId."), null);
         }
 
         bool owns = await db.Projects.AnyAsync(p => p.DeveloperId == developerId && p.UserId == userId);
@@ -114,11 +134,6 @@ public static class SceneEndpoints
         }
 
         Scene? scene = await db.Scenes.FindAsync(developerId, sceneId);
-        if (scene is null)
-        {
-            return (Results.NotFound(), null);
-        }
-
-        return (null, scene);
+        return scene is null ? (Results.NotFound(), null) : (null, scene);
     }
 }

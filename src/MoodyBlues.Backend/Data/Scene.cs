@@ -1,24 +1,25 @@
-using System.ComponentModel.DataAnnotations.Schema;
-
 namespace MoodyBlues.Backend.Data;
 
-/// <summary>Status of the background optimization pass over a scene's raw upload (see <c>Scenes/Processing</c>).</summary>
+/// <summary>Status of the background processing of one uploaded scene revision.</summary>
 public enum SceneProcessingStatus
 {
+    /// <summary>Uploaded, waiting for the scene worker.</summary>
     Pending = 0,
+
+    /// <summary>The worker is building the object registry and/or optimizing the GLB.</summary>
     Processing = 1,
+
+    /// <summary>Registry built and optimized GLB available.</summary>
     Ready = 2,
+
+    /// <summary>Optimization failed. The raw GLB is still servable; see <see cref="SceneRevision.RegistryReady"/> for replays.</summary>
     Failed = 3,
 }
 
 /// <summary>
-/// Metadata for one developer's scene. Identity is the composite
-/// <c>(DeveloperId, SceneId)</c> so two developers can each own their own
-/// <c>SceneId</c> independently.
-///
-/// <see cref="Hash"/> is stored and compared as an opaque string -- the
-/// backend does not parse the uploaded <c>.glb</c> or independently
-/// recompute the hash this milestone (see Handshake plan notes).
+/// One developer's scene, identified by <c>(DeveloperId, SceneId)</c> where SceneId is Unity's
+/// scene-asset GUID. The geometry lives in <see cref="SceneRevision"/> rows, one per scene hash,
+/// because a session must replay against the exact revision it was recorded in (Unity Spec 5.1).
 /// </summary>
 public sealed class Scene
 {
@@ -26,41 +27,57 @@ public sealed class Scene
 
     public required string SceneId { get; set; }
 
-    public required string Hash { get; set; }
+    /// <summary>Hash of the most recently uploaded revision; the dashboard's "current" scene.</summary>
+    public required string LatestHash { get; set; }
 
-    /// <summary>Path (relative to <see cref="Config.ServerConfig.ScenesDir"/>) of the raw, as-uploaded .glb -- always present and always servable, even before/if optimization hasn't finished.</summary>
-    public required string RawGlbPath { get; set; }
-
-    /// <summary>Size in bytes of the raw upload, captured for the "saved X%" stat once optimization completes.</summary>
-    public long RawSizeBytes { get; set; }
-
-    /// <summary>Status of the background Draco/KTX2 optimization pass (see <c>Scenes/Processing/SceneProcessingWorker</c>).</summary>
-    public SceneProcessingStatus ProcessingStatus { get; set; } = SceneProcessingStatus.Pending;
-
-    /// <summary>Path (relative to <see cref="Config.ServerConfig.ScenesDir"/>) of the optimized .glb, once <see cref="ProcessingStatus"/> is <see cref="SceneProcessingStatus.Ready"/>. Null until then.</summary>
-    public string? OptimizedGlbPath { get; set; }
-
-    /// <summary>Size in bytes of the optimized .glb, once available.</summary>
-    public long? OptimizedSizeBytes { get; set; }
-
-    public DateTime UpdatedAtUtc { get; set; }
-
-    /// <summary>
-    /// Dashboard-only display name set via <c>PATCH /api/scenes/{developerId}/{sceneId}</c> (see
-    /// <see cref="MoodyBlues.Backend.Scenes.SceneEndpoints"/>). Purely cosmetic -- <see cref="SceneId"/>
-    /// (the name Unity/the wire protocol actually use) never changes. Null until renamed at least once,
-    /// in which case the frontend falls back to showing <see cref="SceneId"/>.
-    /// </summary>
+    /// <summary>Dashboard-only display name. Null until renamed; the UI falls back to <see cref="SceneId"/>.</summary>
     public string? DisplayName { get; set; }
 
-    /// <summary>
-    /// Size of whichever file is currently servable for this scene -- the optimized output once
-    /// <see cref="ProcessingStatus"/> is <see cref="SceneProcessingStatus.Ready"/>, otherwise the raw
-    /// upload. Mirrors the fallback used by <c>SceneEndpoints.DownloadAsync</c> for the file itself;
-    /// this is a DB-only approximation (no disk check) used purely for display purposes.
-    /// </summary>
-    [NotMapped]
-    public long ServableSizeBytes => ProcessingStatus == SceneProcessingStatus.Ready && OptimizedSizeBytes.HasValue
+    public DateTime CreatedAtUtc { get; set; }
+
+    public DateTime UpdatedAtUtc { get; set; }
+}
+
+/// <summary>
+/// One immutable uploaded revision of a scene, keyed by its scene hash (Unity Spec 13.2). Files are
+/// stored under <c>{ScenesDir}/{developerId}/{sceneId}/{hash}/</c> and never overwritten, so old
+/// sessions keep replaying against the geometry they were recorded with.
+/// </summary>
+public sealed class SceneRevision
+{
+    public required string DeveloperId { get; set; }
+
+    public required string SceneId { get; set; }
+
+    public required string Hash { get; set; }
+
+    /// <summary>Path relative to ScenesDir of the GLB exactly as uploaded.</summary>
+    public required string RawGlbPath { get; set; }
+
+    public long RawSizeBytes { get; set; }
+
+    /// <summary>Path relative to ScenesDir of the optimized GLB, once <see cref="Status"/> is Ready.</summary>
+    public string? OptimizedGlbPath { get; set; }
+
+    public long? OptimizedSizeBytes { get; set; }
+
+    /// <summary>Path relative to ScenesDir of the object registry JSON the session compiler reads.</summary>
+    public string? RegistryPath { get; set; }
+
+    /// <summary>True once the registry exists. Session compilation waits for this, not for optimization.</summary>
+    public bool RegistryReady { get; set; }
+
+    /// <summary>Number of tracked objects (nodes with <c>extras.objectId</c>) in the GLB.</summary>
+    public int TrackedObjectCount { get; set; }
+
+    public SceneProcessingStatus Status { get; set; } = SceneProcessingStatus.Pending;
+
+    public string? ErrorMessage { get; set; }
+
+    public DateTime CreatedAtUtc { get; set; }
+
+    /// <summary>Size of whichever file the dashboard serves: optimized when Ready, otherwise raw.</summary>
+    public long ServableSizeBytes => Status == SceneProcessingStatus.Ready && OptimizedSizeBytes.HasValue
         ? OptimizedSizeBytes.Value
         : RawSizeBytes;
 }

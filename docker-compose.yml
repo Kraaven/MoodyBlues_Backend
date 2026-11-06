@@ -5,9 +5,9 @@ services:
     environment:
       POSTGRES_DB: moodyblues
       POSTGRES_USER: moodyblues
-      POSTGRES_PASSWORD: moodyblues
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: "${MOODYBLUES_DB_PASSWORD:?Set MOODYBLUES_DB_PASSWORD in a .env file to a random password}"
+    # No `ports:` on purpose. The backend reaches Postgres over the compose network as `db`;
+    # publishing 5432 to the host would expose the database to anything that can reach the box.
     volumes:
       - moodyblues-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,41 +25,31 @@ services:
       db:
         condition: service_healthy
     environment:
-      # Bind all interfaces inside the container; this port is never published to the host (see
-      # `networks` below) -- the only way in from the public internet is through the
-      # already-running Nginx Proxy Manager (see README.md's "HTTPS/TLS"), which reaches this
-      # container over the shared `proxy` Docker network instead.
+      # Bind all interfaces inside the container. No port is published to the host: the only way
+      # in is through Nginx Proxy Manager on the shared `proxy` network (README "Deployment").
       MOODYBLUES_HOST: "0.0.0.0"
-      # The hostname clients can actually reach this box on -- handed back in
-      # webSocketUrl/sceneUploadUrl by POST /handshake. Set this in a .env file next to this
-      # compose file (MOODYBLUES_PUBLIC_HOST=<domain-name>). Must be a real DNS name (behind
-      # Cloudflare's proxy is fine -- see README.md's "HTTPS/TLS"), NOT a bare IP or 0.0.0.0.
+      MOODYBLUES_PORT: "8765"
+      # Hostname clients reach the server on, handed back in handshake URLs. A real DNS name.
       MOODYBLUES_PUBLIC_HOST: "${MOODYBLUES_PUBLIC_HOST:?Set MOODYBLUES_PUBLIC_HOST in a .env file to the server's public domain name}"
-      # Clients are told to use https/wss on port 443 (Nginx Proxy Manager), not the internal
-      # http/8765 Kestrel actually binds above.
       MOODYBLUES_PUBLIC_SCHEME: "https"
       MOODYBLUES_PUBLIC_PORT: "443"
-      MOODYBLUES_PORT: "8765"
-      MOODYBLUES_DB_CONNECTION: "Host=db;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues"
-      # Signs dashboard JWTs -- set a real random secret (32+ bytes) in the .env file next to this
-      # compose file. Do NOT ship the insecure code default to production.
-      MOODYBLUES_JWT_SECRET: "${MOODYBLUES_JWT_SECRET:?Set MOODYBLUES_JWT_SECRET in a .env file to a random secret}"
-      # Comma-separated origin(s) the deployed dashboard SPA is served from (e.g.
-      # https://your-app.vercel.app,http://localhost:5173).
+      MOODYBLUES_DB_CONNECTION: "Host=db;Port=5432;Database=moodyblues;Username=moodyblues;Password=${MOODYBLUES_DB_PASSWORD}"
+      MOODYBLUES_JWT_SECRET: "${MOODYBLUES_JWT_SECRET:?Set MOODYBLUES_JWT_SECRET in a .env file to a random secret of 32+ bytes}"
       MOODYBLUES_CORS_ORIGIN: "${MOODYBLUES_CORS_ORIGIN:?Set MOODYBLUES_CORS_ORIGIN in a .env file to the dashboard's origin(s)}"
+      # The proxy sets X-Forwarded-For; trust it so rate limits apply per real client IP.
+      # Safe only because this container is reachable solely through the proxy.
+      MOODYBLUES_TRUST_FORWARDED_HEADERS: "true"
     volumes:
-      - moodyblues-logs:/app/logs
-      - moodyblues-scenes:/app/scenes
-      - moodyblues-sessions:/app/sessions
+      - moodyblues-scenes:/app/data/scenes
+      - moodyblues-sessions:/app/data/sessions
     networks:
-      default: {} # talks to the `db` service above
+      default: {} # talks to `db`
       proxy:
         aliases:
-          - moodyblues-backend # what to enter as the Forward Hostname/IP in NPM's proxy host
+          - moodyblues-backend # the Forward Hostname to enter in Nginx Proxy Manager
 
 volumes:
   moodyblues-db-data:
-  moodyblues-logs:
   moodyblues-scenes:
   moodyblues-sessions:
 

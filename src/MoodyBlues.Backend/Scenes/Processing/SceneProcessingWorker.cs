@@ -1,104 +1,157 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using MoodyBlues.Backend.Config;
+using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Scenes.Processing;
 
 /// <summary>
-/// Sole consumer of <see cref="SceneProcessingQueue"/>. For every enqueued job, runs the raw upload
-/// through <see cref="IGltfOptimizer"/> (Draco-compresses geometry, converts textures to KTX2,
-/// dedupes/prunes unused data -- see the frontend's <c>loadScene.ts</c>, which already wires up
-/// DRACOLoader/KTX2Loader expecting exactly this) and records the result on the <see cref="Scene"/> row.
+/// Processes uploaded scene revisions one at a time, in upload order. The database is the queue:
+/// a revision in <see cref="SceneProcessingStatus.Pending"/> is work to do, and on startup any
+/// revision left in Processing by a crash is put back to Pending.
 ///
-/// Runs jobs strictly one at a time (a single background loop) -- scene uploads are infrequent and this
-/// keeps it simple, with no risk of two optimization passes fighting over the same output file.
-/// Failures never block viewing: <see cref="Scenes.SceneEndpoints.DownloadAsync"/> always falls back to
-/// the raw upload when <see cref="SceneProcessingStatus.Ready"/> hasn't been reached (or the optimized
-/// file isn't actually present on disk).
+/// Two steps, in this order:
+/// <list type="number">
+/// <item>Build the object registry from the raw GLB. This is fast and is all the session compiler
+///   needs, so it is done first and signals the compile worker straight away.</item>
+/// <item>Optimize the GLB for the dashboard. Slow (texture compression); failure only means the
+///   raw file is served instead.</item>
+/// </list>
 /// </summary>
 public sealed class SceneProcessingWorker(
-    SceneProcessingQueue queue,
     IServiceScopeFactory scopeFactory,
-    ServerConfig config,
-    SceneObjectRegistryStore registryStore) : BackgroundService
+    StoragePaths paths,
+    SceneWorkSignal signal,
+    CompileWorkSignal compileSignal) : BackgroundService
 {
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await foreach (SceneProcessingJob job in queue.ReadAllAsync(stoppingToken))
+        await RecoverAsync(stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                using IServiceScope scope = scopeFactory.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
-                var optimizer = scope.ServiceProvider.GetRequiredService<IGltfOptimizer>();
-                await ProcessJobAsync(job, db, optimizer, stoppingToken);
+                bool didWork = await ProcessNextAsync(stoppingToken);
+                if (didWork)
+                {
+                    continue;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                ConsoleLog.Error($"Scene processing: unhandled failure for developer={job.DeveloperId} scene={job.SceneId}", ex);
+                ConsoleLog.Error("Scene processing: unexpected failure.", ex);
+            }
+
+            try
+            {
+                await signal.Signal.WaitAsync(PollInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
             }
         }
     }
 
-    /// <summary>Public so it can be exercised directly in tests with a fake <see cref="IGltfOptimizer"/>, without a running host/queue.</summary>
-    public async Task ProcessJobAsync(SceneProcessingJob job, MoodyBluesDbContext db, IGltfOptimizer optimizer, CancellationToken cancellationToken = default)
+    private async Task RecoverAsync(CancellationToken cancellationToken)
     {
-        Data.Scene? scene = await db.Scenes.FindAsync([job.DeveloperId, job.SceneId], cancellationToken);
-        if (scene is null)
+        using IServiceScope scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
+        List<SceneRevision> stuck = await db.SceneRevisions
+            .Where(r => r.Status == SceneProcessingStatus.Processing)
+            .ToListAsync(cancellationToken);
+        foreach (SceneRevision r in stuck)
         {
-            ConsoleLog.Warn($"Scene processing: skipping developer={job.DeveloperId} scene={job.SceneId} (no longer exists).");
-            return;
+            r.Status = SceneProcessingStatus.Pending;
         }
 
-        scene.ProcessingStatus = SceneProcessingStatus.Processing;
+        if (stuck.Count > 0)
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            ConsoleLog.Info($"Scene processing: re-queued {stuck.Count} revision(s) interrupted by a restart.");
+        }
+    }
+
+    /// <summary>Processes the oldest pending revision, if any. Public for tests.</summary>
+    public async Task<bool> ProcessNextAsync(CancellationToken cancellationToken)
+    {
+        using IServiceScope scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
+        var optimizer = scope.ServiceProvider.GetRequiredService<IGltfOptimizer>();
+
+        SceneRevision? revision = await db.SceneRevisions
+            .Where(r => r.Status == SceneProcessingStatus.Pending)
+            .OrderBy(r => r.CreatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (revision is null)
+        {
+            return false;
+        }
+
+        await ProcessAsync(revision, db, optimizer, cancellationToken);
+        return true;
+    }
+
+    public async Task ProcessAsync(SceneRevision revision, MoodyBluesDbContext db, IGltfOptimizer optimizer, CancellationToken cancellationToken)
+    {
+        string label = $"developer={revision.DeveloperId} scene={revision.SceneId} hash={revision.Hash[..8]}";
+        revision.Status = SceneProcessingStatus.Processing;
         await db.SaveChangesAsync(cancellationToken);
 
-        string rawFullPath = Path.Combine(config.ScenesDir, scene.RawGlbPath);
-        string optimizedRelativePath = Path.Combine(job.DeveloperId, $"{job.SceneId}.optimized.glb");
-        string optimizedFullPath = Path.Combine(config.ScenesDir, optimizedRelativePath);
+        string dir = StoragePaths.SceneRevisionDir(revision.DeveloperId, revision.SceneId, revision.Hash);
+        string rawFull = paths.SceneFull(revision.RawGlbPath);
 
-        bool ok = await optimizer.OptimizeAsync(rawFullPath, optimizedFullPath, cancellationToken);
-
-        // Re-fetch: the row may have been re-uploaded (new hash/RawGlbPath) while we were optimizing the old bytes.
-        scene = await db.Scenes.FindAsync([job.DeveloperId, job.SceneId], cancellationToken);
-        if (scene is null)
+        // Step 1: registry
+        if (!revision.RegistryReady)
         {
-            return;
+            try
+            {
+                SceneRegistry registry = await Task.Run(() => SceneRegistry.BuildFromGlb(rawFull), cancellationToken);
+                string registryRelative = Path.Combine(dir, StoragePaths.RegistryFile);
+                await registry.SaveAsync(paths.SceneFull(registryRelative), cancellationToken);
+                revision.RegistryPath = registryRelative;
+                revision.RegistryReady = true;
+                revision.TrackedObjectCount = registry.Objects.Count;
+                await db.SaveChangesAsync(cancellationToken);
+                compileSignal.Signal.Notify();
+                ConsoleLog.Info($"Scene processing: {label} registry built ({registry.Objects.Count} tracked objects).");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                revision.Status = SceneProcessingStatus.Failed;
+                revision.ErrorMessage = $"Could not read the GLB: {ex.Message}";
+                await db.SaveChangesAsync(cancellationToken);
+                compileSignal.Signal.Notify(); // sessions waiting on this revision can now fail fast
+                ConsoleLog.Warn($"Scene processing: {label} is not a readable GLB: {ex.Message}");
+                return;
+            }
         }
 
-        if (ok && File.Exists(optimizedFullPath) && new FileInfo(optimizedFullPath).Length > 0)
+        // Step 2: optimization
+        string optimizedRelative = Path.Combine(dir, StoragePaths.OptimizedGlbFile);
+        string optimizedFull = paths.SceneFull(optimizedRelative);
+        bool ok = await optimizer.OptimizeAsync(rawFull, optimizedFull, cancellationToken);
+        if (ok)
         {
-            scene.OptimizedGlbPath = optimizedRelativePath;
-            scene.OptimizedSizeBytes = new FileInfo(optimizedFullPath).Length;
-            scene.ProcessingStatus = SceneProcessingStatus.Ready;
-            ConsoleLog.Info(
-                $"Scene processing: developer={job.DeveloperId} scene={job.SceneId} done "
-                + $"({scene.RawSizeBytes} -> {scene.OptimizedSizeBytes} bytes).");
+            revision.OptimizedGlbPath = optimizedRelative;
+            revision.OptimizedSizeBytes = new FileInfo(optimizedFull).Length;
+            revision.Status = SceneProcessingStatus.Ready;
+            revision.ErrorMessage = null;
+            ConsoleLog.Info($"Scene processing: {label} optimized ({revision.RawSizeBytes} -> {revision.OptimizedSizeBytes} bytes).");
         }
         else
         {
-            scene.ProcessingStatus = SceneProcessingStatus.Failed;
-            ConsoleLog.Warn($"Scene processing: developer={job.DeveloperId} scene={job.SceneId} failed -- serving raw upload instead.");
+            revision.Status = SceneProcessingStatus.Failed;
+            revision.ErrorMessage = "Optimization failed; the raw upload is served instead.";
+            ConsoleLog.Warn($"Scene processing: {label} optimization failed; serving the raw upload.");
         }
-
-        BuildAndSaveRegistry(job.DeveloperId, job.SceneId, rawFullPath);
 
         await db.SaveChangesAsync(cancellationToken);
-    }
-
-    private void BuildAndSaveRegistry(string developerId, string sceneId, string rawGlbPath)
-    {
-        try
-        {
-            var registry = SceneObjectRegistryBuilder.BuildFromGlb(rawGlbPath);
-            registryStore.Save(developerId, sceneId, registry);
-            ConsoleLog.Info($"Scene registry: developer={developerId} scene={sceneId} -- {registry.Count} object(s).");
-        }
-        catch (Exception ex)
-        {
-            ConsoleLog.Warn($"Scene registry: failed for developer={developerId} scene={sceneId}: {ex.Message}");
-        }
     }
 }

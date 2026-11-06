@@ -15,8 +15,8 @@ public static class AuthEndpoints
 
     public static void Map(WebApplication app)
     {
-        app.MapPost("/auth/register", RegisterAsync);
-        app.MapPost("/auth/login", LoginAsync);
+        app.MapPost("/auth/register", RegisterAsync).RequireRateLimiting(Common.RateLimits.Auth);
+        app.MapPost("/auth/login", LoginAsync).RequireRateLimiting(Common.RateLimits.Auth);
         app.MapGet("/auth/me", Me).RequireAuthorization();
     }
 

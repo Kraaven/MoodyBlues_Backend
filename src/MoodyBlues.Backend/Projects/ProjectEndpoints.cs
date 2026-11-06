@@ -38,12 +38,16 @@ public static class ProjectEndpoints
             .OrderByDescending(p => p.CreatedAtUtc)
             .ToListAsync();
 
-        var responses = new List<ProjectSummaryResponse>(projects.Count);
-        foreach (Project project in projects)
-        {
-            int sceneCount = await db.Scenes.CountAsync(s => s.DeveloperId == project.DeveloperId);
-            responses.Add(new ProjectSummaryResponse(project.Id, project.Name, project.DeveloperId, project.CreatedAtUtc, sceneCount));
-        }
+        List<string> developerIds = projects.Select(p => p.DeveloperId).ToList();
+        Dictionary<string, int> sceneCounts = await db.Scenes
+            .Where(s => developerIds.Contains(s.DeveloperId))
+            .GroupBy(s => s.DeveloperId)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+
+        var responses = projects
+            .Select(p => new ProjectSummaryResponse(p.Id, p.Name, p.DeveloperId, p.CreatedAtUtc, sceneCounts.GetValueOrDefault(p.DeveloperId)))
+            .ToList();
 
         return Results.Ok(responses);
     }
@@ -57,9 +61,9 @@ public static class ProjectEndpoints
         }
 
         string name = request.Name?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(name))
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 200)
         {
-            return Results.BadRequest("A project name is required.");
+            return Results.BadRequest("A project name of 1-200 characters is required.");
         }
 
         string developerId = await GenerateUniqueDeveloperIdAsync(db);
@@ -104,9 +108,11 @@ public static class ProjectEndpoints
             .OrderByDescending(s => s.UpdatedAtUtc)
             .ToListAsync();
 
-        var sceneResponses = scenes
-            .Select(s => new ProjectSceneResponse(s.SceneId, s.DisplayName, s.UpdatedAtUtc, s.ServableSizeBytes, s.ProcessingStatus))
-            .ToList();
+        var sceneResponses = new List<Scenes.SceneResponse>(scenes.Count);
+        foreach (Scene scene in scenes)
+        {
+            sceneResponses.Add(await Scenes.SceneEndpoints.ToResponseAsync(scene, db));
+        }
 
         return Results.Ok(new ProjectDetailResponse(project.Id, project.Name, project.DeveloperId, project.CreatedAtUtc, sceneResponses));
     }

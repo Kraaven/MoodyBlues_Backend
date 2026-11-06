@@ -17,7 +17,7 @@ namespace MoodyBlues.Backend.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "9.0.9")
+                .HasAnnotation("ProductVersion", "10.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -73,28 +73,15 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("SceneId")
                         .HasColumnType("text");
 
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("DisplayName")
                         .HasColumnType("text");
 
-                    b.Property<string>("Hash")
+                    b.Property<string>("LatestHash")
                         .IsRequired()
                         .HasColumnType("text");
-
-                    b.Property<string>("OptimizedGlbPath")
-                        .HasColumnType("text");
-
-                    b.Property<long?>("OptimizedSizeBytes")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("ProcessingStatus")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("RawGlbPath")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<long>("RawSizeBytes")
-                        .HasColumnType("bigint");
 
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -104,39 +91,104 @@ namespace MoodyBlues.Backend.Migrations
                     b.ToTable("Scenes");
                 });
 
+            modelBuilder.Entity("MoodyBlues.Backend.Data.SceneRevision", b =>
+                {
+                    b.Property<string>("DeveloperId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("SceneId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Hash")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasColumnType("text");
+
+                    b.Property<string>("OptimizedGlbPath")
+                        .HasColumnType("text");
+
+                    b.Property<long?>("OptimizedSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RawGlbPath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("RawSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RegistryPath")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("RegistryReady")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TrackedObjectCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("DeveloperId", "SceneId", "Hash");
+
+                    b.HasIndex("Status");
+
+                    b.ToTable("SceneRevisions");
+                });
+
             modelBuilder.Entity("MoodyBlues.Backend.Data.Session", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("AnimationPath")
+                    b.Property<string>("ClientSessionId")
+                        .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<long>("AnimationSizeBytes")
-                        .HasColumnType("bigint");
+                    b.Property<DateTime?>("CompiledAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("CompilerVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ConnectionCount")
+                        .HasColumnType("integer");
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("DeltaPromotions")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("DeveloperId")
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<long>("DroppedEvents")
+                        .HasColumnType("bigint");
+
                     b.Property<double>("DurationSeconds")
                         .HasColumnType("double precision");
+
+                    b.Property<bool>("EndedCleanly")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
-                    b.Property<string>("EventLogPath")
-                        .HasColumnType("text");
-
-                    b.Property<long>("EventLogSizeBytes")
+                    b.Property<long>("HardClamps")
                         .HasColumnType("bigint");
 
                     b.Property<long>("KeyframeCount")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTime>("LastActivityUtc")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("ObjectCount")
                         .HasColumnType("integer");
@@ -144,17 +196,46 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<long>("RawEventCount")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("RawLogPath")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("RawLogSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ReplayPath")
+                        .HasColumnType("text");
+
+                    b.Property<long>("ReplaySizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SceneHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("SceneId")
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("SceneHash")
-                        .HasColumnType("text");
+                    b.Property<int>("SpawnCount")
+                        .HasColumnType("integer");
 
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
+                    b.Property<string>("StreamTokenHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("StreamTokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("DeveloperId", "ClientSessionId")
+                        .IsUnique();
 
                     b.HasIndex("DeveloperId", "SceneId");
 
@@ -200,6 +281,15 @@ namespace MoodyBlues.Backend.Migrations
                     b.HasOne("MoodyBlues.Backend.Data.Developer", null)
                         .WithMany()
                         .HasForeignKey("DeveloperId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MoodyBlues.Backend.Data.SceneRevision", b =>
+                {
+                    b.HasOne("MoodyBlues.Backend.Data.Scene", null)
+                        .WithMany()
+                        .HasForeignKey("DeveloperId", "SceneId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
