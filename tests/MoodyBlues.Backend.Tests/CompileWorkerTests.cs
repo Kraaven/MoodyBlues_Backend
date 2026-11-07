@@ -28,7 +28,6 @@ public class CompileWorkerTests : IDisposable
             ScenesDir = Path.Combine(_root, "scenes"),
             SessionsDir = Path.Combine(_root, "sessions"),
             ReconnectGracePeriod = TimeSpan.FromSeconds(60),
-            SceneUploadWaitLimit = TimeSpan.FromHours(1),
         };
         _paths = new StoragePaths(_config);
         string dbName = Guid.NewGuid().ToString();
@@ -104,7 +103,7 @@ public class CompileWorkerTests : IDisposable
         Guid recent = await SeedSessionAsync(SessionStatus.Recording, now.AddSeconds(-5));
         Guid open = await SeedSessionAsync(SessionStatus.Recording, now.AddMinutes(-5));
         Guid empty = await SeedSessionAsync(SessionStatus.Recording, now.AddMinutes(-5), writeLog: false);
-        _connections.Opened(open);
+        _connections.Opened(open, new CancellationTokenSource());
 
         await Worker().SealAbandonedAsync(now, CancellationToken.None);
 
@@ -122,7 +121,14 @@ public class CompileWorkerTests : IDisposable
 
         Assert.False(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
 
+        // Uploading the scene version moves its waiting sessions back to Queued.
         await SeedRegistryAsync();
+        using (MoodyBluesDbContext requeue = Db())
+        {
+            (await requeue.Sessions.FindAsync(id))!.Status = SessionStatus.Queued;
+            await requeue.SaveChangesAsync();
+        }
+
         Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
 
         using MoodyBluesDbContext db = Db();
@@ -136,15 +142,15 @@ public class CompileWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task Compile_FailsWhenTheSceneNeverArrives()
+    public async Task Compile_SessionWithoutItsScene_WaitsInsteadOfFailing()
     {
-        Guid id = await SeedSessionAsync(SessionStatus.Queued, DateTime.UtcNow.AddHours(-2));
+        Guid id = await SeedSessionAsync(SessionStatus.Queued, DateTime.UtcNow.AddDays(-3));
 
-        Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
+        Assert.False(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
 
         using MoodyBluesDbContext db = Db();
         Session session = (await db.Sessions.FindAsync(id))!;
-        Assert.Equal(SessionStatus.Failed, session.Status);
-        Assert.Contains("never uploaded", session.ErrorMessage);
+        Assert.Equal(SessionStatus.WaitingForScene, session.Status);
+        Assert.Null(session.ErrorMessage);
     }
 }

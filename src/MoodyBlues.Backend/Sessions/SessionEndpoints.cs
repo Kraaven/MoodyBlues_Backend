@@ -28,7 +28,13 @@ public static class SessionEndpoints
         group.MapDelete("/", DeleteAsync);
     }
 
-    public static async Task<IResult> ListAsync(string developerId, string sceneId, ClaimsPrincipal principal, MoodyBluesDbContext db)
+    public static async Task<IResult> ListAsync(
+        string developerId,
+        string sceneId,
+        int? version,
+        bool? awaitingScene,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db)
     {
         if (!CurrentUser.TryGetUserId(principal, out Guid userId))
         {
@@ -45,12 +51,38 @@ public static class SessionEndpoints
             return Results.NotFound();
         }
 
-        List<SessionSummaryResponse> sessions = await db.Sessions
-            .Where(s => s.DeveloperId == developerId && s.SceneId == sceneId)
+        IQueryable<Session> query = db.Sessions.Where(s => s.DeveloperId == developerId && s.SceneId == sceneId);
+
+        if (version is { } v)
+        {
+            // ?version=N: sessions recorded in that version (the current one, or one in the archive).
+            string? hash = await db.SceneRevisions
+                .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Version == v)
+                .Select(r => r.Hash)
+                .FirstOrDefaultAsync();
+            if (hash is null)
+            {
+                return Results.NotFound("That version does not exist.");
+            }
+
+            query = query.Where(s => s.SceneHash == hash);
+        }
+        else if (awaitingScene == true)
+        {
+            // ?awaitingScene=true: sessions recorded in a version that has not been uploaded yet.
+            query = query.Where(s => !db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash));
+        }
+
+        List<SessionSummaryResponse> sessions = await query
             .OrderByDescending(s => s.CreatedAtUtc)
             .Select(s => new SessionSummaryResponse(
                 s.Id, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.Status, s.EndedCleanly, s.DurationSeconds,
-                s.ObjectCount, s.SpawnCount, s.KeyframeCount, s.ReplaySizeBytes, s.RawLogSizeBytes))
+                s.ObjectCount, s.SpawnCount, s.KeyframeCount, s.ReplaySizeBytes, s.RawLogSizeBytes,
+                db.SceneRevisions
+                    .Where(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash)
+                    .Select(r => (int?)r.Version)
+                    .FirstOrDefault(),
+                s.ErrorMessage))
             .ToListAsync();
 
         return Results.Ok(sessions);
@@ -117,9 +149,9 @@ public static class SessionEndpoints
             return error;
         }
 
-        if (session!.Status is SessionStatus.Recording or SessionStatus.Compiling or SessionStatus.Queued)
+        if (session!.Status is SessionStatus.Recording or SessionStatus.Compiling or SessionStatus.Queued or SessionStatus.WaitingForScene)
         {
-            return Results.Conflict("The session is still recording or already waiting to compile.");
+            return Results.Conflict("The session is still recording, waiting for its scene, or already waiting to compile.");
         }
 
         session.Status = SessionStatus.Queued;

@@ -127,15 +127,24 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<bool>("RegistryReady")
                         .HasColumnType("boolean");
 
+                    b.Property<int>("SkippedMeshCount")
+                        .HasColumnType("integer");
+
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
                     b.Property<int>("TrackedObjectCount")
                         .HasColumnType("integer");
 
+                    b.Property<int>("Version")
+                        .HasColumnType("integer");
+
                     b.HasKey("DeveloperId", "SceneId", "Hash");
 
                     b.HasIndex("Status");
+
+                    b.HasIndex("DeveloperId", "SceneId", "Version")
+                        .IsUnique();
 
                     b.ToTable("SceneRevisions");
                 });

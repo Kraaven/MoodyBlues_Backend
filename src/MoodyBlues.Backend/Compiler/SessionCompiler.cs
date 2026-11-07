@@ -21,7 +21,7 @@ public static class SessionCompiler
         CancellationToken cancellationToken = default)
     {
         CompiledReplay replay = await Task.Run(
-            () => new SessionReconstructor(registry, tolerances).Run(RawLogReader.Read(rawLogFullPath)),
+            () => new SessionReconstructor(registry, tolerances).Run(RawLogReader.Read(rawLogFullPath), cancellationToken),
             cancellationToken);
 
         await StoragePaths.WriteAtomicAsync(replayFullPath, s => ReplayFileWriter.WriteGzipAsync(replay, s), cancellationToken);

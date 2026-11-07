@@ -51,14 +51,37 @@ public sealed class ServerConfig
     /// </summary>
     public TimeSpan ReconnectGracePeriod { get; init; } = TimeSpan.FromSeconds(60);
 
-    /// <summary>How long a queued session waits for its scene revision to be uploaded before failing.</summary>
-    public TimeSpan SceneUploadWaitLimit { get; init; } = TimeSpan.FromHours(24);
-
-    /// <summary>Largest accepted WebSocket message. The client sends at most 8 KB.</summary>
-    public int MaxStreamMessageBytes { get; init; } = 64 * 1024;
+    /// <summary>
+    /// Largest accepted WebSocket message. The client's largest message setting is 128 KB; the
+    /// margin covers a final message that is slightly over its packet target.
+    /// </summary>
+    public int MaxStreamMessageBytes { get; init; } = 160 * 1024;
 
     /// <summary>Largest accepted scene upload, measured after gzip decompression.</summary>
     public long MaxSceneUploadBytes { get; init; } = 512L * 1024 * 1024;
+
+    // ---- Quotas (security plan, phase 1). A value of 0 disables that quota. -------------------
+
+    /// <summary>Stored scene versions per scene, current and archived together.</summary>
+    public int MaxRevisionsPerScene { get; init; } = 200;
+
+    /// <summary>Sessions per developer that are recording at the same time.</summary>
+    public int MaxConcurrentSessionsPerDeveloper { get; init; } = 50;
+
+    /// <summary>Raw log size of one session. The stream is closed once it is reached.</summary>
+    public long MaxSessionRawLogBytes { get; init; } = 512L * 1024 * 1024;
+
+    /// <summary>Wall-clock length of one session, measured from its handshake.</summary>
+    public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromHours(6);
+
+    /// <summary>All scene and session files of one developer (project) together.</summary>
+    public long MaxStoragePerDeveloperBytes { get; init; } = 20L * 1024 * 1024 * 1024;
+
+    /// <summary>One compile is cancelled after this long, so a pathological log cannot stall the worker.</summary>
+    public TimeSpan CompileTimeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Heap limit for the gltf-transform (Node) process that optimizes uploaded scenes.</summary>
+    public int OptimizerMemoryLimitMb { get; init; } = 2048;
 
     /// <summary>Executable for the scene optimization pass (the pinned <c>@gltf-transform/cli</c> in the Docker image).</summary>
     public string GltfTransformCommand { get; init; } = "gltf-transform";
@@ -89,8 +112,14 @@ public sealed class ServerConfig
             StreamInactivityTimeout = TimeSpan.FromSeconds(TryParseInt(Env("MOODYBLUES_STREAM_INACTIVITY_TIMEOUT_SECONDS"), 30)),
             StreamHeartbeatInterval = TimeSpan.FromSeconds(Math.Max(1, TryParseInt(Env("MOODYBLUES_STREAM_HEARTBEAT_SECONDS"), 10))),
             ReconnectGracePeriod = TimeSpan.FromSeconds(TryParseInt(Env("MOODYBLUES_RECONNECT_GRACE_SECONDS"), 60)),
-            SceneUploadWaitLimit = TimeSpan.FromHours(TryParseInt(Env("MOODYBLUES_SCENE_UPLOAD_WAIT_HOURS"), 24)),
             MaxSceneUploadBytes = TryParseInt(Env("MOODYBLUES_MAX_SCENE_UPLOAD_MB"), 512) * 1024L * 1024L,
+            MaxRevisionsPerScene = TryParseInt(Env("MOODYBLUES_MAX_REVISIONS_PER_SCENE"), 200),
+            MaxConcurrentSessionsPerDeveloper = TryParseInt(Env("MOODYBLUES_MAX_CONCURRENT_SESSIONS"), 50),
+            MaxSessionRawLogBytes = TryParseInt(Env("MOODYBLUES_MAX_SESSION_MB"), 512) * 1024L * 1024L,
+            MaxSessionDuration = TimeSpan.FromMinutes(TryParseInt(Env("MOODYBLUES_MAX_SESSION_MINUTES"), 360)),
+            MaxStoragePerDeveloperBytes = TryParseInt(Env("MOODYBLUES_MAX_STORAGE_GB"), 20) * 1024L * 1024L * 1024L,
+            CompileTimeout = TimeSpan.FromMinutes(Math.Max(1, TryParseInt(Env("MOODYBLUES_COMPILE_TIMEOUT_MINUTES"), 10))),
+            OptimizerMemoryLimitMb = Math.Max(256, TryParseInt(Env("MOODYBLUES_OPTIMIZER_MEMORY_MB"), 2048)),
             GltfTransformCommand = Env("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
             JwtSecret = Env("MOODYBLUES_JWT_SECRET") ?? InsecureDefaultJwtSecret,
             CorsOrigins = ParseCorsOrigins(Env("MOODYBLUES_CORS_ORIGIN")),

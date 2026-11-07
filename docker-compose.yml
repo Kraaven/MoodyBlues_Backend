@@ -15,12 +15,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Uploaded scenes are untrusted input processed by gltf-transform; these limits keep one bad
+    # upload or a runaway compile from taking down the host. Override in .env if the box is bigger.
+    mem_limit: "${MOODYBLUES_MEMORY_LIMIT:-4g}"
+    cpus: "${MOODYBLUES_CPU_LIMIT:-2}"
+    pids_limit: 512
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy

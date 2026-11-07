@@ -42,7 +42,10 @@ public static class HandshakeEndpoints
             return Results.BadRequest("sceneHash must be 64 lowercase hex characters.");
         }
 
-        await DeveloperProvisioning.EnsureExistsAsync(db, request.DeveloperId);
+        if (!await IngestAccess.IsRegisteredDeveloperAsync(db, request.DeveloperId))
+        {
+            return Results.NotFound(IngestAccess.UnknownDeveloperMessage);
+        }
 
         // A retried handshake (same client run) reuses the session; a fresh token is issued and
         // the old one stops working, so only the latest URL the client was given is valid.
@@ -52,6 +55,15 @@ public static class HandshakeEndpoints
 
         if (session is null)
         {
+            if (config.MaxConcurrentSessionsPerDeveloper > 0 &&
+                await db.Sessions.CountAsync(s => s.DeveloperId == request.DeveloperId && s.Status == SessionStatus.Recording)
+                    >= config.MaxConcurrentSessionsPerDeveloper)
+            {
+                return Results.Problem(
+                    $"This project already has {config.MaxConcurrentSessionsPerDeveloper} recordings in progress.",
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
             var id = Guid.NewGuid();
             DateTime now = DateTime.UtcNow;
             session = new Session

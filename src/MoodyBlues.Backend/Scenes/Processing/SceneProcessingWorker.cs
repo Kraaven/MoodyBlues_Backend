@@ -94,7 +94,17 @@ public sealed class SceneProcessingWorker(
             return false;
         }
 
-        await ProcessAsync(revision, db, optimizer, cancellationToken);
+        try
+        {
+            await ProcessAsync(revision, db, optimizer, cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The version (or its scene) was deleted while it was processed; drop what was written.
+            SceneDeletion.TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneRevisionDir(revision.DeveloperId, revision.SceneId, revision.Hash)));
+            ConsoleLog.Info($"Scene processing: {revision.DeveloperId}/{revision.SceneId} v{revision.Version} was deleted while processing.");
+        }
+
         return true;
     }
 

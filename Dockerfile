@@ -47,8 +47,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get autoremove -y
 
 # data/scenes and data/sessions are written relative to the working directory (ServerConfig.cs);
-# docker-compose.yml mounts volumes over them.
+# docker-compose.yml mounts volumes over them. They are created here, owned by the image's
+# non-root `app` user, so fresh volumes inherit that ownership.
+RUN mkdir -p /app/data/scenes /app/data/sessions && chown -R app:app /app/data
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 8765
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
     CMD curl -fsS http://localhost:8765/health || exit 1
-ENTRYPOINT ["dotnet", "MoodyBlues.Backend.dll"]
+
+# The entrypoint starts as root only to hand volumes created by older images (owned by root) to
+# the `app` user, then runs the server as `app`. Nothing else runs as root.
+ENTRYPOINT ["docker-entrypoint.sh"]

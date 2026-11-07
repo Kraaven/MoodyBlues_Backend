@@ -17,6 +17,12 @@ public enum SessionStatus
 
     /// <summary>Compilation failed; see <see cref="Session.ErrorMessage"/>. The raw log is kept, so it can be recompiled.</summary>
     Failed = 4,
+
+    /// <summary>
+    /// Recording is over, but the scene version it was recorded in has not been uploaded. It waits
+    /// indefinitely; uploading that version (from a build, the Unity menu, or the game) queues it.
+    /// </summary>
+    WaitingForScene = 5,
 }
 
 /// <summary>

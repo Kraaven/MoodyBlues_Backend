@@ -27,6 +27,9 @@ public sealed class WireDecoder
 
     public bool HasBegunSession { get; private set; }
 
+    /// <summary>Protocol version declared by the most recent BeginSession (0 until then).</summary>
+    public ushort ProtocolVersion { get; private set; }
+
     /// <summary>Validates and then decodes one WebSocket message into <paramref name="sink"/>.</summary>
     /// <exception cref="ProtocolException">The message is malformed; nothing was emitted.</exception>
     public void DecodeMessage(ReadOnlySpan<byte> message, IWireEventSink sink)
@@ -42,11 +45,30 @@ public sealed class WireDecoder
     public void Validate(ReadOnlySpan<byte> message)
     {
         bool begun = HasBegunSession;
+        ushort version = ProtocolVersion;
         int offset = 0;
         while (offset < message.Length)
         {
             byte type = message[offset];
-            int size = EventSize(type, offset);
+
+            if (type == (byte)EventType.BeginSession)
+            {
+                // The layout after the version depends on the version, so read it first.
+                if (offset + 3 > message.Length)
+                {
+                    throw new ProtocolException($"Truncated BeginSession at offset {offset}.");
+                }
+
+                version = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2));
+                if (version < ProtocolConstants.MinProtocolVersion || version > ProtocolConstants.ProtocolVersion)
+                {
+                    throw new ProtocolException(
+                        $"Unsupported protocol version {version}; this server implements " +
+                        $"{ProtocolConstants.MinProtocolVersion}-{ProtocolConstants.ProtocolVersion}.");
+                }
+            }
+
+            int size = EventSize(type, offset, version);
             if (offset + size > message.Length)
             {
                 throw new ProtocolException(
@@ -55,15 +77,7 @@ public sealed class WireDecoder
 
             if (type == (byte)EventType.BeginSession)
             {
-                ushort version = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2));
-                if (version < ProtocolConstants.MinProtocolVersion || version > ProtocolConstants.ProtocolVersion)
-                {
-                    throw new ProtocolException(
-                        $"Unsupported protocol version {version}; this server implements " +
-                        $"{ProtocolConstants.MinProtocolVersion}-{ProtocolConstants.ProtocolVersion}.");
-                }
-
-                WireRanges ranges = ReadRanges(message.Slice(offset + 7, 28));
+                (_, WireRanges ranges) = ReadSettings(message.Slice(offset, size), version);
                 if (!ranges.IsValid)
                 {
                     throw new ProtocolException("BeginSession declares invalid quantization ranges.");
@@ -101,25 +115,36 @@ public sealed class WireDecoder
         _ => -1,
     };
 
-    private static int EventSize(byte type, int offset) => type switch
+    private static int EventSize(byte type, int offset, ushort version) => type switch
     {
         (byte)EventType.TimeStamp => ProtocolConstants.TimeStampSize,
-        (byte)EventType.BeginSession => ProtocolConstants.BeginSessionSize,
+        (byte)EventType.BeginSession => ProtocolConstants.BeginSessionSizeFor(version),
         (byte)EventType.KeepAlive => ProtocolConstants.KeepAliveSize,
         (byte)EventType.EndSession => ProtocolConstants.EndSessionSize,
-        (byte)EventType.Log => ProtocolConstants.LogSize,
+        (byte)EventType.Log => ProtocolConstants.LogSizeFor(version),
         _ when ProtocolConstants.TryGetPayloadSize(type, out int payload) => ProtocolConstants.EnvelopeSize + payload,
         _ => throw new ProtocolException($"Unknown event type {type} at offset {offset}."),
     };
 
-    private static WireRanges ReadRanges(ReadOnlySpan<byte> d) => new(
-        BinaryPrimitives.ReadSingleLittleEndian(d),
-        BinaryPrimitives.ReadSingleLittleEndian(d[4..]),
-        BinaryPrimitives.ReadSingleLittleEndian(d[8..]),
-        BinaryPrimitives.ReadSingleLittleEndian(d[12..]),
-        BinaryPrimitives.ReadSingleLittleEndian(d[16..]),
-        BinaryPrimitives.ReadSingleLittleEndian(d[20..]),
-        BinaryPrimitives.ReadSingleLittleEndian(d[24..]));
+    /// <summary>
+    /// Capture rate and the 7 tunable ranges from a whole BeginSession event: float32 up to v2,
+    /// float16 from v3. The client applies the decoded float16 values to itself, so both sides
+    /// use bit-identical ranges.
+    /// </summary>
+    private static (float CaptureHz, WireRanges Ranges) ReadSettings(ReadOnlySpan<byte> evt, ushort version)
+    {
+        ReadOnlySpan<byte> d = evt[3..];
+        Span<float> v = stackalloc float[8];
+        bool compact = version >= ProtocolConstants.CompactVersion;
+        for (int i = 0; i < v.Length; i++)
+        {
+            v[i] = compact
+                ? (float)BinaryPrimitives.ReadHalfLittleEndian(d[(i * 2)..])
+                : BinaryPrimitives.ReadSingleLittleEndian(d[(i * 4)..]);
+        }
+
+        return (v[0], new WireRanges(v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
+    }
 
     private void Decode(ReadOnlySpan<byte> message, IWireEventSink sink)
     {
@@ -127,7 +152,10 @@ public sealed class WireDecoder
         while (offset < message.Length)
         {
             byte type = message[offset];
-            int size = EventSize(type, offset);
+            ushort version = type == (byte)EventType.BeginSession
+                ? BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2))
+                : ProtocolVersion;
+            int size = EventSize(type, offset, version);
             ReadOnlySpan<byte> evt = message.Slice(offset, size);
             offset += size;
 
@@ -139,11 +167,10 @@ public sealed class WireDecoder
 
                 case EventType.BeginSession:
                 {
-                    var info = new BeginSessionInfo(
-                        BinaryPrimitives.ReadUInt16LittleEndian(evt[1..]),
-                        BinaryPrimitives.ReadSingleLittleEndian(evt[3..]),
-                        ReadRanges(evt[7..]));
+                    (float captureHz, WireRanges ranges) = ReadSettings(evt, version);
+                    var info = new BeginSessionInfo(version, captureHz, ranges);
                     Ranges = info.Ranges;
+                    ProtocolVersion = version;
                     HasBegunSession = true;
                     sink.OnBeginSession(info);
                     continue;
@@ -165,7 +192,7 @@ public sealed class WireDecoder
                 case EventType.Log:
                 {
                     // Text is zero-padded; it ends at the first zero byte.
-                    ReadOnlySpan<byte> text = evt.Slice(2, ProtocolConstants.LogTextBytes);
+                    ReadOnlySpan<byte> text = evt.Slice(2, ProtocolConstants.LogTextBytesFor(ProtocolVersion));
                     int end = text.IndexOf((byte)0);
                     sink.OnLog(evt[1], end < 0 ? text : text[..end]);
                     continue;

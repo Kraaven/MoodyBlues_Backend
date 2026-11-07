@@ -133,7 +133,7 @@ public class DashboardEndpointsTests : IDisposable
     {
         var (_, dev, db) = await SeedAsync();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
-            await SessionEndpoints.ListAsync(dev, "scene1", TestPrincipal.For(Guid.NewGuid()), db));
+            await SessionEndpoints.ListAsync(dev, "scene1", null, null, TestPrincipal.For(Guid.NewGuid()), db));
         Assert.Equal(404, status);
     }
 }

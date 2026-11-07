@@ -37,6 +37,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Handshake_NewSession_CreatesRow_AndAsksForUpload()
     {
         using var db = TestDbContextFactory.Create();
+        await SeedProjectAsync(db, "dev1");
 
         var result = await HandshakeEndpoints.HandleAsync(new HandshakeRequest("dev1", "scene1", Hash, "run-1"), db, _config);
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(result);
@@ -56,6 +57,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Handshake_Retry_ReusesSession_AndRotatesToken()
     {
         using var db = TestDbContextFactory.Create();
+        await SeedProjectAsync(db, "dev1");
         var request = new HandshakeRequest("dev1", "scene1", Hash, "run-1");
 
         var first = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, db, _config));
@@ -70,6 +72,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Handshake_AfterSessionEnded_IsRefused()
     {
         using var db = TestDbContextFactory.Create();
+        await SeedProjectAsync(db, "dev1");
         var request = new HandshakeRequest("dev1", "scene1", Hash, "run-1");
         await HandshakeEndpoints.HandleAsync(request, db, _config);
         (await db.Sessions.SingleAsync()).Status = SessionStatus.Ready;
@@ -119,7 +122,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_StoresAnImmutableRevision_PerHash()
     {
         using var db = TestDbContextFactory.Create();
-        await DeveloperProvisioning.EnsureExistsAsync(db, "dev1");
+        await SeedProjectAsync(db, "dev1");
         byte[] glb = FakeGlb(1000);
 
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "dev1", "scene1", Hash, glb, gzip: true));
@@ -137,7 +140,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_SameHashTwice_KeepsTheFirstFile()
     {
         using var db = TestDbContextFactory.Create();
-        await DeveloperProvisioning.EnsureExistsAsync(db, "dev1");
+        await SeedProjectAsync(db, "dev1");
         byte[] original = FakeGlb(100);
 
         await UploadAsync(db, "dev1", "scene1", Hash, original, gzip: false);
@@ -151,7 +154,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_NotAGlb_IsRejected_AndNothingIsStored()
     {
         using var db = TestDbContextFactory.Create();
-        await DeveloperProvisioning.EnsureExistsAsync(db, "dev1");
+        await SeedProjectAsync(db, "dev1");
 
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "dev1", "scene1", Hash, [1, 2, 3, 4, 5], gzip: false));
 
@@ -165,7 +168,7 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_TooLarge_IsRejected()
     {
         using var db = TestDbContextFactory.Create();
-        await DeveloperProvisioning.EnsureExistsAsync(db, "dev1");
+        await SeedProjectAsync(db, "dev1");
         var small = new ServerConfig { ScenesDir = _config.ScenesDir, MaxSceneUploadBytes = 1000 };
 
         IResult result = await SceneUploadEndpoints.HandleAsync("scene1", Request("dev1", Hash, FakeGlb(5000), gzip: false), db, small, _paths, new SceneWorkSignal());
@@ -216,9 +219,20 @@ public class IngestEndpointsTests : IDisposable
         return context.Request;
     }
 
-    internal static async Task SeedRevisionAsync(MoodyBluesDbContext db, string developerId, string sceneId, string hash, string? rawPath = null)
+    /// <summary>Ingest endpoints only accept developer IDs that belong to a dashboard project.</summary>
+    internal static async Task SeedProjectAsync(MoodyBluesDbContext db, string developerId)
     {
         await DeveloperProvisioning.EnsureExistsAsync(db, developerId);
+        if (!await db.Projects.AnyAsync(p => p.DeveloperId == developerId))
+        {
+            db.Projects.Add(new Project { Id = Guid.NewGuid(), UserId = Guid.NewGuid(), Name = developerId, DeveloperId = developerId, CreatedAtUtc = DateTime.UtcNow });
+            await db.SaveChangesAsync();
+        }
+    }
+
+    internal static async Task SeedRevisionAsync(MoodyBluesDbContext db, string developerId, string sceneId, string hash, string? rawPath = null)
+    {
+        await SeedProjectAsync(db, developerId);
         if (await db.Scenes.FindAsync(developerId, sceneId) is null)
         {
             db.Scenes.Add(new Scene { DeveloperId = developerId, SceneId = sceneId, LatestHash = hash, CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow });

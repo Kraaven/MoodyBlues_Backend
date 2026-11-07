@@ -17,11 +17,13 @@ namespace MoodyBlues.Backend.Compiler;
 /// <list type="number">
 /// <item><b>Seal:</b> a Recording session with no open connection and no activity for
 ///   <see cref="ServerConfig.ReconnectGracePeriod"/> is Queued (the client is not coming back).</item>
-/// <item><b>Compile:</b> the oldest Queued session whose scene registry is ready is compiled. A
-///   session whose scene revision never arrives fails after
-///   <see cref="ServerConfig.SceneUploadWaitLimit"/>.</item>
+/// <item><b>Compile:</b> the oldest Queued session whose scene registry is ready is compiled.
+///   A Queued session whose scene version has not been uploaded moves to WaitingForScene, where
+///   it stays, outside the queue, until that version is uploaded (SceneUploadEndpoints moves it
+///   back). Waiting sessions therefore never hold up the ones behind them.</item>
 /// </list>
-/// One session compiles at a time; compilation runs off the request path, on a pool thread.
+/// One session compiles at a time, on a pool thread, and is cancelled after
+/// <see cref="ServerConfig.CompileTimeout"/>.
 /// </summary>
 public sealed class CompileWorker(
     IServiceScopeFactory scopeFactory,
@@ -120,37 +122,63 @@ public sealed class CompileWorker(
         using IServiceScope scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
 
-        List<Session> queued = await db.Sessions
-            .Where(s => s.Status == SessionStatus.Queued)
-            .OrderBy(s => s.LastActivityUtc)
-            .Take(50)
+        // Queued sessions whose scene version is missing wait outside the queue.
+        List<Session> missingScene = await db.Sessions
+            .Where(s => s.Status == SessionStatus.Queued &&
+                        !db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash))
+            .Take(500)
             .ToListAsync(cancellationToken);
 
-        foreach (Session session in queued)
+        // Queued sessions whose scene version was uploaded but cannot be read will never compile.
+        List<Session> unusableScene = await db.Sessions
+            .Where(s => s.Status == SessionStatus.Queued &&
+                        db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
+                                                   r.Status == SceneProcessingStatus.Failed && !r.RegistryReady))
+            .Take(500)
+            .ToListAsync(cancellationToken);
+
+        foreach (Session s in missingScene)
         {
-            SceneRevision? revision = await db.SceneRevisions.FindAsync(
-                [session.DeveloperId, session.SceneId, session.SceneHash], cancellationToken);
-
-            if (revision is { RegistryReady: true, RegistryPath: not null })
-            {
-                await CompileAsync(session, revision, db, cancellationToken);
-                return true;
-            }
-
-            bool revisionUnusable = revision is { Status: SceneProcessingStatus.Failed, RegistryReady: false };
-            bool waitedTooLong = revision is null && nowUtc - session.LastActivityUtc > config.SceneUploadWaitLimit;
-            if (revisionUnusable || waitedTooLong)
-            {
-                session.Status = SessionStatus.Failed;
-                session.ErrorMessage = revisionUnusable
-                    ? "The scene this session was recorded in could not be read, so it cannot be replayed."
-                    : "The scene this session was recorded in was never uploaded, so it cannot be replayed.";
-                await db.SaveChangesAsync(cancellationToken);
-                return true;
-            }
+            s.Status = SessionStatus.WaitingForScene;
         }
 
-        return false;
+        foreach (Session s in unusableScene)
+        {
+            s.Status = SessionStatus.Failed;
+            s.ErrorMessage = "The scene this session was recorded in could not be read, so it cannot be replayed.";
+        }
+
+        if (missingScene.Count + unusableScene.Count > 0)
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        Session? next = await db.Sessions
+            .Where(s => s.Status == SessionStatus.Queued &&
+                        db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
+                                                   r.RegistryReady && r.RegistryPath != null))
+            .OrderBy(s => s.LastActivityUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (next is null)
+        {
+            return false;
+        }
+
+        SceneRevision revision = (await db.SceneRevisions.FindAsync([next.DeveloperId, next.SceneId, next.SceneHash], cancellationToken))!;
+        try
+        {
+            await CompileAsync(next, revision, db, cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The session (or its whole scene) was deleted while it compiled. Its replay file
+            // was written into a directory the deletion already removed; remove it again.
+            SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(next.DeveloperId, next.Id)));
+            ConsoleLog.Info($"Compile worker: session {next.Id} was deleted while compiling; discarded its output.");
+        }
+
+        return true;
     }
 
     private async Task CompileAsync(Session session, SceneRevision revision, MoodyBluesDbContext db, CancellationToken cancellationToken)
@@ -158,16 +186,19 @@ public sealed class CompileWorker(
         session.Status = SessionStatus.Compiling;
         await db.SaveChangesAsync(cancellationToken);
 
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(config.CompileTimeout);
+
         string replayRelative = Path.Combine(StoragePaths.SessionDir(session.DeveloperId, session.Id), StoragePaths.ReplayFile);
         try
         {
-            SceneRegistry registry = await SceneRegistry.LoadAsync(paths.SceneFull(revision.RegistryPath!), cancellationToken);
+            SceneRegistry registry = await SceneRegistry.LoadAsync(paths.SceneFull(revision.RegistryPath!), timeout.Token);
             var started = DateTime.UtcNow;
             CompiledReplay replay = await SessionCompiler.CompileAsync(
                 paths.SessionFull(session.RawLogPath),
                 registry,
                 paths.SessionFull(replayRelative),
-                cancellationToken: cancellationToken);
+                cancellationToken: timeout.Token);
 
             session.ReplayPath = replayRelative;
             session.ReplaySizeBytes = new FileInfo(paths.SessionFull(replayRelative)).Length;
@@ -192,6 +223,13 @@ public sealed class CompileWorker(
                 $"Compiled session {session.Id}: {replay.DurationSeconds:F1}s, {replay.Objects.Count} objects, " +
                 $"{replay.RawEventCount} events -> {replay.KeyframeCount} keys, {session.ReplaySizeBytes} bytes " +
                 $"in {(DateTime.UtcNow - started).TotalMilliseconds:F0} ms.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            session.Status = SessionStatus.Failed;
+            session.ErrorMessage = $"Compilation took longer than {config.CompileTimeout.TotalMinutes:F0} minutes and was stopped.";
+            await db.SaveChangesAsync(CancellationToken.None);
+            ConsoleLog.Warn($"Compile worker: session {session.Id} timed out.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -68,36 +68,50 @@ public sealed class StreamServer(
         }
 
         using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
-        await RunConnectionAsync(socket, session.Id, session.RawLogPath, context.RequestAborted);
+        await RunConnectionAsync(socket, session, context.RequestAborted);
     }
 
-    private async Task RunConnectionAsync(WebSocket socket, Guid sessionId, string rawLogRelative, CancellationToken requestAborted)
+    private async Task RunConnectionAsync(WebSocket socket, Session session, CancellationToken requestAborted)
     {
-        string rawLogFull = paths.SessionFull(rawLogRelative);
-        RawLogWriter writer = writers.Acquire(rawLogFull);
-        connections.Opened(sessionId);
+        Guid sessionId = session.Id;
+        string rawLogFull = paths.SessionFull(session.RawLogPath);
 
-        int connectionIndex = await RecordConnectionOpenedAsync(sessionId);
-        writer.AppendConnectionOpened((uint)connectionIndex);
+        // Cancelled by scene deletion (ActiveConnections.Abort) or the server stopping.
+        using var abort = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
+        using var inactivity = CancellationTokenSource.CreateLinkedTokenSource(abort.Token);
+        using var sendLock = new SemaphoreSlim(1, 1);
+        using var heartbeatStop = new CancellationTokenSource();
+
+        RawLogWriter? writer = null;
+        IDisposable? registration = null;
+        Task heartbeat = Task.CompletedTask;
+        uint connectionIndex = 0;
+        bool opened = false;
 
         var decoder = new WireDecoder(requireBeginSession: true);
         var endDetector = new EndSessionDetector();
         var buffer = new byte[16 * 1024];
         using var message = new MemoryStream();
-        using var inactivity = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
-        inactivity.CancelAfter(config.StreamInactivityTimeout);
 
         var closeReason = RawLogCloseReason.ClientClosed;
         long messages = 0, rejected = 0;
         DateTime lastActivityWrite = DateTime.UtcNow;
-
-        // A WebSocket allows one send at a time; the heartbeat and the close replies share it.
-        using var sendLock = new SemaphoreSlim(1, 1);
-        using var heartbeatStop = new CancellationTokenSource();
-        Task heartbeat = RunHeartbeatAsync(socket, sendLock, heartbeatStop.Token);
+        DateTime sessionDeadline = config.MaxSessionDuration > TimeSpan.Zero
+            ? session.CreatedAtUtc + config.MaxSessionDuration
+            : DateTime.MaxValue;
 
         try
         {
+            // Everything acquired here is released in finally, whatever throws.
+            registration = connections.Opened(sessionId, abort);
+            writer = writers.Acquire(rawLogFull);
+            connectionIndex = (uint)await RecordConnectionOpenedAsync(sessionId);
+            writer.AppendConnectionOpened(connectionIndex);
+            opened = true;
+
+            inactivity.CancelAfter(config.StreamInactivityTimeout);
+            heartbeat = RunHeartbeatAsync(socket, sendLock, heartbeatStop.Token);
+
             while (socket.State == WebSocketState.Open)
             {
                 message.SetLength(0);
@@ -157,14 +171,27 @@ public sealed class StreamServer(
                         break;
                     }
 
-                    ConsoleLog.Warn($"Session {sessionId}: rejected a {bytes.Length}-byte message: {ex.Message}");
-                    writer.Append(RawLogRecordKind.RejectedMessage, bytes.Span);
+                    // Only the first few are logged in full; a broken client can send thousands.
+                    if (rejected <= 5)
+                    {
+                        ConsoleLog.Warn($"Session {sessionId}: rejected a {bytes.Length}-byte message: {ex.Message}");
+                    }
+
+                    writer.Append(RawLogRecordKind.RejectedMessage, bytes.Span, connectionIndex);
                     continue;
                 }
 
-                writer.Append(RawLogRecordKind.Message, bytes.Span);
+                writer.Append(RawLogRecordKind.Message, bytes.Span, connectionIndex);
                 messages++;
                 inactivity.CancelAfter(config.StreamInactivityTimeout);
+
+                if (QuotaExceeded(writer.Length, sessionDeadline) is { } quotaMessage)
+                {
+                    ConsoleLog.Warn($"Session {sessionId}: {quotaMessage}; closing the connection.");
+                    await CloseOutputAsync(socket, sendLock, WebSocketCloseStatus.PolicyViolation, quotaMessage);
+                    closeReason = RawLogCloseReason.Error;
+                    break;
+                }
 
                 if (DateTime.UtcNow - lastActivityWrite > ActivityWriteInterval)
                 {
@@ -175,7 +202,7 @@ public sealed class StreamServer(
         }
         catch (OperationCanceledException)
         {
-            closeReason = requestAborted.IsCancellationRequested ? RawLogCloseReason.ServerShutdown : RawLogCloseReason.InactivityTimeout;
+            closeReason = abort.IsCancellationRequested ? RawLogCloseReason.ServerShutdown : RawLogCloseReason.InactivityTimeout;
         }
         catch (WebSocketException)
         {
@@ -191,10 +218,25 @@ public sealed class StreamServer(
             heartbeatStop.Cancel();
             await heartbeat; // never throws; see RunHeartbeatAsync
 
-            writer.AppendConnectionClosed(closeReason);
-            long size = writer.Length;
-            writers.Release(rawLogFull);
-            connections.Closed(sessionId);
+            long size = 0;
+            if (writer is not null)
+            {
+                try
+                {
+                    if (opened) writer.AppendConnectionClosed(closeReason, connectionIndex);
+                    size = writer.Length;
+                }
+                catch (Exception ex)
+                {
+                    ConsoleLog.Error($"Session {sessionId}: could not write the connection-closed record.", ex);
+                }
+                finally
+                {
+                    writers.Release(rawLogFull);
+                }
+            }
+
+            registration?.Dispose();
 
             await TouchAsync(sessionId, size, endDetector.Seen);
             if (endDetector.Seen)
@@ -206,6 +248,17 @@ public sealed class StreamServer(
                 $"Session {sessionId}: connection #{connectionIndex} closed ({closeReason}), " +
                 $"{messages} message(s) stored, {rejected} rejected, endSession={endDetector.Seen}.");
         }
+    }
+
+    /// <summary>The reason the session has to stop, or null while it is within its quotas.</summary>
+    private string? QuotaExceeded(long rawLogBytes, DateTime sessionDeadline)
+    {
+        if (config.MaxSessionRawLogBytes > 0 && rawLogBytes >= config.MaxSessionRawLogBytes)
+        {
+            return "session size limit reached";
+        }
+
+        return DateTime.UtcNow >= sessionDeadline ? "session duration limit reached" : null;
     }
 
     private async Task<int> RecordConnectionOpenedAsync(Guid sessionId)

@@ -35,6 +35,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             entity.HasKey(r => new { r.DeveloperId, r.SceneId, r.Hash });
             entity.HasOne<Scene>().WithMany().HasForeignKey(r => new { r.DeveloperId, r.SceneId });
             entity.HasIndex(r => r.Status);
+            entity.HasIndex(r => new { r.DeveloperId, r.SceneId, r.Version }).IsUnique();
             entity.Ignore(r => r.ServableSizeBytes);
         });
 

@@ -69,6 +69,9 @@ public sealed class SessionReconstructor : IWireEventSink
 
     private readonly Dictionary<ushort, ObjectState> _objects = new();
     private readonly Dictionary<ushort, SceneRegistryObject> _registry;
+    private readonly List<SceneRegistryObject> _registryOrdered;
+    private readonly Dictionary<ushort, ushort[]> _templateDescendants = new();
+    private ushort _protocolVersion;
     private readonly FitTolerances _tolerances;
     private readonly List<ReplayEvent> _events = [];
 
@@ -78,7 +81,8 @@ public sealed class SessionReconstructor : IWireEventSink
     private double _tick = 1.0 / 40.0;
     private WireRanges _ranges = WireRanges.Default;
     private bool _rangesKnown;
-    private WireDecoder? _decoder;
+    private readonly Dictionary<uint, WireDecoder> _decoders = new();
+    private uint _latestConnection;
     private int _connectionCount;
     private bool _endedCleanly;
     private SessionEndReason? _endReason;
@@ -99,6 +103,7 @@ public sealed class SessionReconstructor : IWireEventSink
     public SessionReconstructor(SceneRegistry registry, FitTolerances? tolerances = null)
     {
         _registry = registry.ToDictionary();
+        _registryOrdered = registry.Objects.OrderBy(o => o.ObjectId).ToList();
         _tolerances = tolerances ?? FitTolerances.Default;
 
         foreach (SceneRegistryObject o in registry.Objects)
@@ -126,34 +131,48 @@ public sealed class SessionReconstructor : IWireEventSink
     }
 
     /// <summary>Feeds every record of a raw log, then finishes and returns the replay.</summary>
-    public CompiledReplay Run(IEnumerable<RawLogRecord> records)
+    public CompiledReplay Run(IEnumerable<RawLogRecord> records, CancellationToken cancellationToken = default)
     {
+        int count = 0;
         foreach (RawLogRecord record in records)
         {
+            if ((++count & 255) == 0) cancellationToken.ThrowIfCancellationRequested();
             Apply(record);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return Finish();
     }
 
     public void Apply(RawLogRecord record)
     {
+        // Logs written before connection indexes existed attribute every record to the most
+        // recently opened connection, which is how they were always read.
+        uint connection = record.Connection == RawLogFormat.UnknownConnection ? _latestConnection : record.Connection;
+
         switch (record.Kind)
         {
             case RawLogRecordKind.ConnectionOpened:
             {
                 uint index = record.Payload.Length >= 4 ? BinaryPrimitives.ReadUInt32LittleEndian(record.Payload.Span) : (uint)_connectionCount;
-                _decoder = new WireDecoder(requireBeginSession: true);
+                if (record.Connection != RawLogFormat.UnknownConnection) index = record.Connection;
+                _latestConnection = index;
+                _decoders[index] = new WireDecoder(requireBeginSession: true);
                 _connectionCount++;
                 AddMarker(ReplayEventType.Connected, aux: 0, a: (ushort)Math.Min(index, ushort.MaxValue));
                 break;
             }
 
             case RawLogRecordKind.Message:
-                _decoder ??= new WireDecoder(requireBeginSession: true);
+                if (!_decoders.TryGetValue(connection, out WireDecoder? decoder))
+                {
+                    decoder = new WireDecoder(requireBeginSession: true);
+                    _decoders[connection] = decoder;
+                }
+
                 try
                 {
-                    _decoder.DecodeMessage(record.Payload.Span, this);
+                    decoder.DecodeMessage(record.Payload.Span, this);
                 }
                 catch (ProtocolException)
                 {
@@ -171,7 +190,10 @@ public sealed class SessionReconstructor : IWireEventSink
             case RawLogRecordKind.ConnectionClosed:
                 FlushPendingLog();
                 AddMarker(ReplayEventType.Disconnected, record.Payload.Length > 0 ? record.Payload.Span[0] : (byte)0, 0);
-                _decoder = null;
+
+                // Only this connection's decoder goes. Another connection of the same session may
+                // still be open (a reconnect that overlapped the old connection's late close).
+                _decoders.Remove(connection);
                 break;
         }
     }
@@ -247,6 +269,8 @@ public sealed class SessionReconstructor : IWireEventSink
             _ranges = info.Ranges;
             _rangesKnown = true;
         }
+
+        _protocolVersion = info.ProtocolVersion;
     }
 
     public void OnKeepAlive() => _rawEventCount++;
@@ -336,7 +360,95 @@ public sealed class SessionReconstructor : IWireEventSink
         if (o.Known)
         {
             Sample(o, TransformFields.Position | TransformFields.Rotation | TransformFields.Scale, discontinuity: false);
+
+            if (_protocolVersion >= ProtocolConstants.CompactVersion)
+            {
+                SpawnSubtree(objectId, templateObjectId);
+            }
         }
+    }
+
+    /// <summary>
+    /// Protocol v3: the client registered the clone's whole subtree with consecutive IDs after the
+    /// root's, in walk order. The template's tracked descendants, in ascending ObjectID order
+    /// (which is walk order), map one to one onto that block. Each starts at its template node's
+    /// local pose; the client sends an absolute transform for any that did not.
+    /// </summary>
+    private void SpawnSubtree(ushort rootId, ushort templateId)
+    {
+        ushort[] descendants = TemplateDescendants(templateId);
+        if (descendants.Length == 0 || rootId + descendants.Length > ushort.MaxValue)
+        {
+            return;
+        }
+
+        var cloneIdOf = new Dictionary<ushort, ushort>(descendants.Length + 1) { [templateId] = rootId };
+        for (int i = 0; i < descendants.Length; i++)
+        {
+            cloneIdOf[descendants[i]] = (ushort)(rootId + 1 + i);
+        }
+
+        foreach (ushort templateNode in descendants)
+        {
+            SceneRegistryObject t = _registry[templateNode];
+            ushort id = cloneIdOf[templateNode];
+            ushort parent = cloneIdOf.GetValueOrDefault(t.ParentObjectId, rootId);
+            var p = CoordinateSpace.PositionGltfToUnity(new Vector3(t.Translation[0], t.Translation[1], t.Translation[2]));
+            var r = CoordinateSpace.RotationGltfToUnity(new Quaternion(t.Rotation[0], t.Rotation[1], t.Rotation[2], t.Rotation[3]), t.InvertLook);
+            var s = new Vector3(t.Scale[0], t.Scale[1], t.Scale[2]);
+
+            _objects[id] = new ObjectState
+            {
+                Id = id,
+                Kind = ReplayObjectKind.SpawnedPart,
+                Known = true,
+                Emitted = true,
+                Template = templateNode,
+                Parent = parent,
+                InitialParent = parent,
+                SpawnTime = _now,
+                InvertLook = t.InvertLook,
+                Radius = t.Radius,
+                P = p,
+                R = r,
+                S = s,
+                SeedP = p,
+                SeedR = r,
+                SeedS = s,
+            };
+        }
+    }
+
+    /// <summary>A template's tracked descendants, ascending ObjectID. Cached per template.</summary>
+    private ushort[] TemplateDescendants(ushort templateId)
+    {
+        if (_templateDescendants.TryGetValue(templateId, out ushort[]? cached))
+        {
+            return cached;
+        }
+
+        var result = new List<ushort>();
+        foreach (SceneRegistryObject o in _registryOrdered)
+        {
+            if (o.ObjectId <= templateId) continue;
+            if (!HasRegistryAncestor(o, templateId)) break; // a subtree's IDs are contiguous
+            result.Add(o.ObjectId);
+        }
+
+        ushort[] array = result.ToArray();
+        _templateDescendants[templateId] = array;
+        return array;
+    }
+
+    private bool HasRegistryAncestor(SceneRegistryObject o, ushort ancestorId)
+    {
+        int guard = 0;
+        for (ushort p = o.ParentObjectId; p != 0 && guard++ < 4096; p = _registry.TryGetValue(p, out var parent) ? parent.ParentObjectId : (ushort)0)
+        {
+            if (p == ancestorId) return true;
+        }
+
+        return false;
     }
 
     public void OnReparent(ushort objectId, ushort newParentObjectId, Vector3 position, Quaternion rotation, Vector3 scale)
@@ -515,24 +627,34 @@ public sealed class SessionReconstructor : IWireEventSink
 
         if (o.Kind == ReplayObjectKind.Scene && _now > 0)
         {
-            Span<float> v = stackalloc float[4];
-            switch (channel)
-            {
-                case ReplayChannel.Position:
-                    Write(CoordinateSpace.PositionUnityToGltf(o.SeedP), v);
-                    break;
-                case ReplayChannel.Rotation:
-                    Write(Quaternion.Normalize(CoordinateSpace.RotationUnityToGltf(o.SeedR, o.InvertLook)), v);
-                    break;
-                default:
-                    Write(o.SeedS, v);
-                    break;
-            }
-
-            fitter.Add(0, v);
+            AddSeedKey(fitter, o, channel, 0);
+        }
+        else if (o.Kind == ReplayObjectKind.SpawnedPart && _now > o.SpawnTime)
+        {
+            // A clone child holds its template pose from its spawn until it first moves.
+            AddSeedKey(fitter, o, channel, o.SpawnTime);
         }
 
         return fitter;
+    }
+
+    private static void AddSeedKey(ChannelFitter fitter, ObjectState o, ReplayChannel channel, double time)
+    {
+        Span<float> v = stackalloc float[4];
+        switch (channel)
+        {
+            case ReplayChannel.Position:
+                Write(CoordinateSpace.PositionUnityToGltf(o.SeedP), v);
+                break;
+            case ReplayChannel.Rotation:
+                Write(Quaternion.Normalize(CoordinateSpace.RotationUnityToGltf(o.SeedR, o.InvertLook)), v);
+                break;
+            default:
+                Write(o.SeedS, v);
+                break;
+        }
+
+        fitter.Add(time, v);
     }
 
     private static void Write(Vector3 value, Span<float> dest)

@@ -8,6 +8,13 @@ public enum ReplayObjectKind : byte
 
     /// <summary>Created during the session by InstantiateObject; the viewer clones its template.</summary>
     Spawned = 1,
+
+    /// <summary>
+    /// A descendant of a spawned object (protocol v3 subtree spawns). It is not cloned on its own:
+    /// it is the clone's copy of <see cref="ReplayObject.TemplateObjectId"/>, a node inside the
+    /// template's subtree, and its tracks animate that copy.
+    /// </summary>
+    SpawnedPart = 2,
 }
 
 /// <summary>Animated properties. The numeric values are the channel ids in the replay file.</summary>

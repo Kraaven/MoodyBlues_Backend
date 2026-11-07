@@ -41,8 +41,10 @@ public static class SceneCheckEndpoints
             return Results.BadRequest("sceneHash must be 64 lowercase hex characters.");
         }
 
-        // Same as the handshake: the upload that may follow needs the developer row to exist.
-        await DeveloperProvisioning.EnsureExistsAsync(db, request.DeveloperId);
+        if (!await IngestAccess.IsRegisteredDeveloperAsync(db, request.DeveloperId))
+        {
+            return Results.NotFound(IngestAccess.UnknownDeveloperMessage);
+        }
 
         bool sceneUploadRequired = !await db.SceneRevisions.AnyAsync(r =>
             r.DeveloperId == request.DeveloperId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);

@@ -54,6 +54,9 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+
+        // The GLB is untrusted input; cap the Node heap so one upload cannot take the whole host.
+        startInfo.Environment["NODE_OPTIONS"] = $"--max-old-space-size={config.OptimizerMemoryLimitMb}";
         foreach (string arg in BuildArguments(inputPath, outputPath))
         {
             startInfo.ArgumentList.Add(arg);
@@ -78,6 +81,12 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
                 process.Kill(entireProcessTree: true);
                 ConsoleLog.Error($"Scene processing: gltf-transform timed out after {Timeout.TotalMinutes} min for {inputPath}.");
                 return false;
+            }
+            catch (OperationCanceledException)
+            {
+                // Server shutting down: do not leave the optimizer running without its parent.
+                process.Kill(entireProcessTree: true);
+                throw;
             }
 
             if (process.ExitCode != 0)

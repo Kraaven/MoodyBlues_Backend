@@ -11,8 +11,12 @@ out/
 logs/
 *.log
 
-# Runtime data (ServerConfig defaults: data/scenes, data/sessions)
-data/
+# Runtime data written by a locally run server (ServerConfig defaults: data/scenes, data/sessions).
+# Anchored on purpose: a bare "data/" also matches the Data/ source folder on Windows, where git
+# ignores case, and that silently kept new source files out of the repository.
+/data/
+/src/MoodyBlues.Backend/data/scenes/
+/src/MoodyBlues.Backend/data/sessions/
 /scenes/
 /sessions/
 

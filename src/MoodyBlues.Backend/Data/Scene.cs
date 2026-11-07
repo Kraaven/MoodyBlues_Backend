@@ -51,6 +51,15 @@ public sealed class SceneRevision
 
     public required string Hash { get; set; }
 
+    /// <summary>
+    /// Per-scene version number, 1, 2, ... in upload order. The highest is the scene's current
+    /// version; all others are archived.
+    /// </summary>
+    public int Version { get; set; }
+
+    /// <summary>Meshes the exporter could not read and left out (reported by the client, runtime exports only).</summary>
+    public int SkippedMeshCount { get; set; }
+
     /// <summary>Path relative to ScenesDir of the GLB exactly as uploaded.</summary>
     public required string RawGlbPath { get; set; }
 

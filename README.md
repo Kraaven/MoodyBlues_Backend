@@ -1,24 +1,24 @@
 # MoodyBlues Backend
 
-C# (.NET) backend for the MoodyBlues Unity project. It's an ASP.NET Core host that:
+The server side of MoodyBlues, an ASP.NET Core (.NET 10) app backed by Postgres. It:
 
-- Runs a `/handshake` endpoint Unity calls on startup, deciding whether the client needs to
-  (re-)upload its scene and telling it which WebSocket URL to stream to.
-- Accepts scene uploads (`.glb`, see below) on `/scenes/{sceneId}`.
-- Hosts the WebSocket server (`/stream`) that receives the binary transform-streaming protocol
-  described in `Spec.md` (see the Unity project at `MoodyBlues_Unity/Spec.md`) and decodes it into
-  structured events.
-- Serves a JWT-authenticated dashboard API (`/auth/*`, `/api/projects`, `/api/scenes/...`) backing
-  the companion [Moody_FrontEnd](../Moody_FrontEnd) React app -- account registration/login,
-  Projects (each with a `DeveloperId` used by the Unity-facing endpoints above), and per-scene
-  rename/download for the in-browser GLB viewer. See "Dashboard API" below.
+- receives recordings from Unity games: the handshake, the scene check, scene uploads, and the
+  binary event stream (`/stream`, a WebSocket);
+- stores each recording as an append-only raw log and compiles it into a replay file in the
+  background;
+- keeps every uploaded version of every scene, so old recordings keep replaying against the
+  scene they were recorded in;
+- serves the dashboard API (JWT-authenticated) used by `MoodyBlues_FrontEnd`.
+
+The wire protocol is specified in `MoodyBlues_Unity/Spec.md`. If this README and the code disagree,
+the code is right.
 
 ## Requirements
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download) (for local `dotnet build`/`dotnet test`)
-- Docker + Docker Compose (for running the deployed stack -- see below)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download), for `dotnet build` and `dotnet test`
+- Docker with Docker Compose, for running the deployed stack
 
-## Build & test
+## Build and test
 
 ```bash
 dotnet build
@@ -27,348 +27,270 @@ dotnet test
 
 ## Running the server (Docker, Linux)
 
-The whole stack (Postgres + backend) is defined in `docker-compose.yml` and built from the
-`Dockerfile` in this repo. `deploy.sh` is a single self-contained script for standing it up on a
-fresh Linux box (or managing it on one you already deployed to). See "HTTPS/TLS" below for how it
-plugs into a reverse proxy for TLS termination.
+`docker-compose.yml` defines the stack (Postgres and the backend), built from the `Dockerfile`.
+`deploy.sh` stands it up on a Linux box and manages it afterwards.
 
 ```bash
 curl -O https://raw.githubusercontent.com/Kraaven/MoodyBlues_Backend/main/deploy.sh
 chmod +x deploy.sh
-./deploy.sh              # clones the repo (if needed), builds, and starts everything
+./deploy.sh              # clones the repo if needed, builds, and starts everything
 ```
 
-If you've already cloned the repo, just run `./deploy.sh` from inside it (or anywhere -- it
-looks for a checkout next to itself, or in `./MoodyBlues_Backend`, before cloning a fresh one).
-
 ```
-./deploy.sh start     # (default) build (if needed) and start Postgres + backend
-./deploy.sh stop      # stop the stack; data is kept, so 'start' again is fast
+./deploy.sh start     # (default) build if needed and start
+./deploy.sh stop      # stop; data is kept
 ./deploy.sh restart   # stop, then start
-./deploy.sh reset     # stop, git fetch/pull latest, rebuild, start -- the update command
-./deploy.sh logs      # tail logs from both containers
-./deploy.sh status    # show container status
+./deploy.sh reset     # stop, git pull, rebuild, start: the update command
+./deploy.sh logs      # follow both containers' logs
+./deploy.sh status    # container status
 ```
 
-`docker-compose.yml` creates the `moodyblues` Postgres role/database that the backend's default
-`ServerConfig` connection string already expects, and Postgres data / uploaded scenes / logs all
-live in Docker named volumes, so `reset`/`restart` never lose data.
+All state lives in Docker named volumes (`moodyblues-db-data`, `moodyblues-scenes`,
+`moodyblues-sessions`), so `reset` and `restart` never lose data. Database migrations run
+automatically at startup.
 
-The `Dockerfile`'s Node.js/`gltf-transform`/`toktx` install step (see "Scene optimization
-pipeline" below) is slow -- several minutes on a cold cache -- but Docker caches that layer across
-builds as long as its `RUN` instruction's text and base image don't change, so day-to-day `reset`s
-after the first successful build stay fast. Only bump/edit that block (e.g. for a KTX-Software
-version update) when you actually need to; expect the next build after such an edit to pay the
-multi-minute cost again.
-
-Database migrations are applied automatically on startup (`db.Database.MigrateAsync()` in
-`Program.cs`), so no separate migration step is needed.
-
-Before starting the stack, create a `.env` file next to `docker-compose.yml` with:
+Create a `.env` file next to `docker-compose.yml`:
 
 ```
+MOODYBLUES_DB_PASSWORD=<random password>
 MOODYBLUES_PUBLIC_HOST=your-domain.example.com
-MOODYBLUES_JWT_SECRET=<a long random secret, e.g. `openssl rand -base64 48`>
-MOODYBLUES_CORS_ORIGIN=https://your-app.vercel.app,http://localhost:5173
+MOODYBLUES_JWT_SECRET=<long random secret, e.g. `openssl rand -base64 48`>
+MOODYBLUES_CORS_ORIGIN=https://your-dashboard.example.com,http://localhost:5173
 ```
 
-See "HTTPS/TLS" immediately below for what this needs to point at and why.
+Postgres sets its password only when its volume is first created. If you change
+`MOODYBLUES_DB_PASSWORD` later, the backend can no longer log in. Either change the password
+inside Postgres too, or start over with `docker compose down -v`, which **deletes all data**.
 
-### HTTPS/TLS
+The Dockerfile's Node.js / `gltf-transform` / `toktx` layer takes several minutes on a cold build.
+Docker caches it, so later builds are fast unless that block changes.
 
-Unity's Player Settings reject plain HTTP/WS `UnityWebRequest`/`ClientWebSocket` connections by
-default (`Allow downloads over HTTP` = `Not Allowed`), so a production deployment needs to actually
-terminate TLS, not just bind Kestrel to a port.
+### Container security
 
-This backend does not run its own TLS/reverse-proxy container -- if the host already runs
-[Nginx Proxy Manager](https://nginxproxymanager.com/) (or similar) fronting other services, that
-should be the single place handling TLS for everything on the box, rather than each app fighting
-over port 80/443. Instead, `docker-compose.yml` joins the `backend` service to an **external**
-Docker network named `proxy` (created independently, e.g. by whatever set up NPM) under the alias
-`moodyblues-backend`, so NPM can reach it directly without it ever being published to the host or
-the public internet.
+- The server runs as the non-root `app` user from the .NET base image.
+- The entrypoint (`docker-entrypoint.sh`) starts as root only to hand files in `/app/data` that
+  older images created as root over to `app`, then drops root before the server starts.
+- `docker-compose.yml` limits the backend's memory, CPUs and process count. Override them with
+  `MOODYBLUES_MEMORY_LIMIT` (default `4g`) and `MOODYBLUES_CPU_LIMIT` (default `2`) in `.env`.
+- Docker's container logs rotate at 20 MB × 5 files per container.
+- No ports are published. Postgres is reachable only on the compose network, and the backend
+  only through the reverse proxy (below).
 
-- `MOODYBLUES_PUBLIC_SCHEME=https` and `MOODYBLUES_PUBLIC_PORT=443` (set in `docker-compose.yml`)
-  tell the backend to hand Unity back `wss://`/`https://` URLs from `POST /handshake` instead of
-  `ws://`/`http://`, matching what NPM actually serves to the internet.
-- If your setup doesn't have an existing reverse proxy on the host, adjust the `networks:` section
-  in `docker-compose.yml` accordingly (e.g. publish `8765` directly and run your own TLS proxy in
-  front of it instead).
+### HTTPS / TLS
 
-One-time setup (adjust names/network if your reverse proxy setup differs):
+Unity Player builds refuse plain HTTP and WS, so production needs TLS. The backend doesn't
+terminate TLS itself. It joins an external Docker network named `proxy` as
+`moodyblues-backend`, and an existing reverse proxy (Nginx Proxy Manager on our server) serves it.
 
-1. `docker network create proxy` if that external network doesn't already exist (skip this if
-   your reverse proxy already created it, as ours does).
-2. Start the stack (`./deploy.sh start`/`reset`) so the `backend` container joins that network.
-3. In the NPM web UI, **Add Proxy Host**:
-   - Domain Names: `MOODYBLUES_PUBLIC_HOST` (e.g. `moodyblues.kraaven.net`)
-   - Scheme: `http`, Forward Hostname/IP: `moodyblues-backend`, Forward Port: `8765`
-   - **Websockets Support: enabled** (required -- `/stream` is a WebSocket endpoint)
-   - SSL tab: request a new Let's Encrypt certificate, enable **Force SSL**. This works even
-     though the domain is Cloudflare-proxied -- NPM already does exactly this for the other
-     domains on this box.
-4. Make sure the DNS record for `MOODYBLUES_PUBLIC_HOST` points at this server (proxied through
-   Cloudflare is fine, same as the rest of `*.kraaven.net`).
+1. `docker network create proxy`, if that network doesn't exist yet.
+2. Start the stack so the backend joins the network.
+3. In Nginx Proxy Manager, **Add Proxy Host**:
+   - Domain: `MOODYBLUES_PUBLIC_HOST`
+   - Scheme `http`, forward host `moodyblues-backend`, port `8765`
+   - **Websockets Support: on** (`/stream` is a WebSocket)
+   - SSL: a Let's Encrypt certificate, with **Force SSL** on
+4. Point DNS at the server. Proxying through Cloudflare is fine.
 
-On the Unity side, `Assets/Resources/BluesClientConfig.asset`'s `backendBaseUrl` must match --
-`https://your-domain.example.com` (no `:443`, it's the default port).
+`docker-compose.yml` sets `MOODYBLUES_PUBLIC_SCHEME=https` and `MOODYBLUES_PUBLIC_PORT=443`, so
+the handshake hands clients `wss://` and `https://` URLs. Each scene config's `backendBaseUrl` in
+Unity must be `https://your-domain.example.com`.
 
-For local development (`dotnet run`, no Docker/reverse proxy), none of this applies: the server
-still defaults to plain `http://localhost:8765`, which the Unity Editor (unlike Player builds)
-never blocks regardless of the `Allow downloads over HTTP` setting.
+**Cloudflare and idle connections.** Cloudflare resets a WebSocket whose server side stays
+silent for about a minute, even while the game is streaming to it. The server therefore sends a
+one-byte `KeepAlive` message down every `/stream` connection every 10 seconds
+(`MOODYBLUES_STREAM_HEARTBEAT_SECONDS`). The game ignores it.
+
+**Rate limiting behind Cloudflare.** With `MOODYBLUES_TRUST_FORWARDED_HEADERS=true` (set in
+compose), rate limits key on Cloudflare's `CF-Connecting-IP` header, falling back to
+`X-Forwarded-For`. This is safe only while the backend can be reached solely through the proxy.
 
 ### Running locally without Docker
 
-If you'd rather run the backend directly (e.g. for debugging in an IDE), point it at any
-Postgres with a `moodyblues` role/database -- `docker compose up -d db` starts just the database
-part of the stack above -- then:
+Start a Postgres with a `moodyblues` role and database (`docker compose up -d db` does that), then:
 
 ```bash
 dotnet run --project src/MoodyBlues.Backend
 ```
 
-By default the server listens on `http://localhost:8765`, serving `POST /handshake`,
-`POST /scenes/{sceneId}`, and the `/stream` WebSocket endpoint the Unity client
-(`BluesStreamer.ConnectAsync`) connects to (using the URL returned by `/handshake` -- it's opaque
-to Unity, not a hardcoded constant). Every decoded event is logged in detail to the console so you
-can confirm the wire protocol round-trips correctly.
+It listens on `http://localhost:8765`. The Unity Editor allows plain HTTP, so a scene config can
+point at it directly.
 
-Configuration is via environment variables (all optional):
+### Configuration
+
+Everything is optional except where a deployment needs it (see `.env` above).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MOODYBLUES_HOST` | `localhost` | Interface to bind (`0.0.0.0` for all interfaces -- set for you inside Docker) |
-| `MOODYBLUES_PORT` | `8765` | Port to listen on (handshake, scene upload, and WebSocket all share this one port) |
-| `MOODYBLUES_PUBLIC_HOST` | `MOODYBLUES_HOST`, else `localhost` | Hostname handed back to clients in `webSocketUrl`/`sceneUploadUrl` -- must be a real domain reachable from the internet in production (see "HTTPS/TLS" above) |
-| `MOODYBLUES_PUBLIC_SCHEME` | `http` | `http` or `https` -- controls whether clients are told to use `ws`/`http` or `wss`/`https`. Set to `https` only once a TLS reverse proxy is actually in front of the server |
-| `MOODYBLUES_PUBLIC_PORT` | `MOODYBLUES_PORT` | Port handed back to clients; omitted from the URL entirely when it's the scheme's default (443 for https, 80 for http) |
-| `MOODYBLUES_LOG_RAW_BYTES` | `1` | Log a hex preview of each raw message at debug level |
-| `MOODYBLUES_LOG_DIR` | `logs` | Directory for the runtime log files below |
-| `MOODYBLUES_DB_CONNECTION` | `Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues` | Postgres connection string (Developers/Scenes metadata) |
-| `MOODYBLUES_SCENES_DIR` | `scenes` | Directory uploaded `.glb` files are written to (one subfolder per developer) |
-| `MOODYBLUES_GLTF_TRANSFORM_CMD` | `gltf-transform` | Executable used for the background Draco/KTX2 optimization pass (see "Scene optimization pipeline" above); overridable for local dev/tests that don't have it on `PATH` |
-| `MOODYBLUES_JWT_SECRET` | insecure dev-only placeholder | Symmetric secret signing dashboard JWTs -- **must** be set to a real random secret (32+ bytes) in production; the server logs a startup warning if it's still the default |
-| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated origin(s) the dashboard SPA is served from, allowed via CORS (e.g. `https://your-app.vercel.app,http://localhost:5173`) |
+| `MOODYBLUES_HOST` | `localhost` | Bind address (`0.0.0.0` in Docker) |
+| `MOODYBLUES_PORT` | `8765` | Listen port, for HTTP and the WebSocket |
+| `MOODYBLUES_PUBLIC_HOST` | `MOODYBLUES_HOST` | Host handed to clients in `webSocketUrl` and `sceneUploadUrl` |
+| `MOODYBLUES_PUBLIC_SCHEME` | `http` | `https` behind a TLS proxy, which makes the URLs `wss://` and `https://` |
+| `MOODYBLUES_PUBLIC_PORT` | `MOODYBLUES_PORT` | Port handed to clients; left out of URLs when it is the scheme's default |
+| `MOODYBLUES_DB_CONNECTION` | local `moodyblues` database | Postgres connection string |
+| `MOODYBLUES_SCENES_DIR` | `data/scenes` | Scene files |
+| `MOODYBLUES_SESSIONS_DIR` | `data/sessions` | Session raw logs and replay files |
+| `MOODYBLUES_JWT_SECRET` | insecure dev value | Signs dashboard logins. **Set it in production**; the server warns at startup if it is the default |
+| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated dashboard origins |
+| `MOODYBLUES_TRUST_FORWARDED_HEADERS` | off | Trust `X-Forwarded-*` and `CF-Connecting-IP` (proxy deployments only) |
+| `MOODYBLUES_STREAM_INACTIVITY_TIMEOUT_SECONDS` | `30` | Close a `/stream` connection that delivers no valid message for this long |
+| `MOODYBLUES_STREAM_HEARTBEAT_SECONDS` | `10` | Interval of the server's KeepAlive on `/stream` |
+| `MOODYBLUES_RECONNECT_GRACE_SECONDS` | `60` | How long a dropped recording waits for its game to reconnect before it is compiled |
+| `MOODYBLUES_COMPILE_TIMEOUT_MINUTES` | `10` | One compile is stopped (and the session marked Failed) after this long |
+| `MOODYBLUES_GLTF_TRANSFORM_CMD` | `gltf-transform` | Scene optimizer executable |
+| `MOODYBLUES_OPTIMIZER_MEMORY_MB` | `2048` | Heap limit for the optimizer (Node) process |
 
-### Runtime logs
+**Quotas** (0 turns one off):
 
-While running, the server also maintains two persistent log files under `logs/`
-(created automatically):
+| Variable | Default | Limit |
+|---|---|---|
+| `MOODYBLUES_MAX_SCENE_UPLOAD_MB` | `512` | One scene upload, measured after decompression |
+| `MOODYBLUES_MAX_REVISIONS_PER_SCENE` | `200` | Stored versions per scene, current and archived |
+| `MOODYBLUES_MAX_CONCURRENT_SESSIONS` | `50` | Recordings in progress per project |
+| `MOODYBLUES_MAX_SESSION_MB` | `512` | Raw log size of one recording; the stream is closed when it is reached |
+| `MOODYBLUES_MAX_SESSION_MINUTES` | `360` | Length of one recording, from its handshake |
+| `MOODYBLUES_MAX_STORAGE_GB` | `20` | All scene and session files of one project |
 
-- `logs/binary.log` -- one line per WebSocket binary message received: when it
-  arrived, its size in bytes, and the `Seconds` value from its `TimeStamp` event
-  (the time the message represents on Unity's clock).
-- `logs/events.log` -- every event decoded from every message, with a header per
-  message and a long `----...----` separator between each message's block of
-  events.
+---
 
-## HTTP API
+## How a recording flows
+
+1. **Handshake.** The game calls `POST /handshake`, which creates a session in **Recording** and
+   returns a WebSocket URL with a secret token.
+2. **Scene check and upload.**
+   - `POST /scenes/check` (or the handshake) says whether this scene version (its hash) is stored.
+   - If not, the Unity editor (at build time or from the Tools menu) or the game uploads it to
+     `POST /scenes/{sceneId}`.
+   - Each new hash becomes a new numbered **version** of the scene.
+3. **Streaming.** The game streams to `/stream`. Every valid message is appended to the session's
+   raw log, tagged with its connection number. The game may reconnect; the new connection
+   appends to the same log.
+4. **End of recording.** The session is queued for compiling when either:
+   - the game sends `EndSession` and closes, or
+   - it has been gone for the reconnect grace period.
+5. **Compile.** The compile worker builds the replay file from the raw log and that version's
+   object registry. A session whose scene version hasn't been uploaded goes to
+   **WaitingForScene**. It stays there with no time limit, and compiles as soon as that version
+   is uploaded.
+
+Session statuses: `Recording`, `Queued`, `Compiling`, `Ready`, `Failed`, `WaitingForScene`.
+
+**Who can send data.** The Unity-facing endpoints accept only developer IDs that belong to a
+dashboard project; create a project to get one. The ID ships inside game builds, so treat it as
+public. The quotas above limit what a leaked ID can cost.
+
+## Unity-facing API
 
 ### `POST /handshake`
 
-Called once by Unity on startup, before it connects to the event WebSocket.
-
 ```json
-{ "developerId": "string", "sceneId": "string", "sceneHash": "string", "sessionId": "string" }
+{ "developerId": "...", "sceneId": "...", "sceneHash": "<64 hex>", "sessionId": "<client GUID>" }
 ```
 
-->
-
 ```json
-{ "webSocketUrl": "ws://host:port/stream?session=...", "sceneUploadRequired": true, "sceneUploadUrl": "http://host:port/scenes/{sceneId}?developerId=...&sceneHash=..." }
+{ "webSocketUrl": "wss://host/stream?token=...", "sceneUploadRequired": true, "sceneUploadUrl": "https://host/scenes/{sceneId}?developerId=...&sceneHash=..." }
 ```
 
-(`ws`/`http` above assume the plain local-dev setup; behind the Caddy TLS proxy described in
-"HTTPS/TLS" above, these come back as `wss`/`https` with no port instead.)
-
-`sceneUploadUrl` is present only when `sceneUploadRequired` is `true` -- i.e. no scene is on file
-for `(developerId, sceneId)` yet, or its stored hash doesn't match `sceneHash`. `DeveloperId` rows
-are auto-provisioned on first sight (no registration/auth yet -- see `Data/Developer.cs`).
-`sceneHash` is stored and compared as an opaque string; the backend does not independently
-recompute it from the uploaded scene file this milestone.
+- **Unknown developer ID:** 404.
+- **Too many recordings in progress for the project:** 429.
+- **Retries:** a retried handshake with the same `sessionId` reuses the session and issues a new
+  token; the old token stops working.
 
 ### `POST /scenes/check`
 
-Called by Unity's `SendScene` to find out whether a scene revision needs uploading, without
-starting a session. Same validation, developer auto-provisioning and `Ingest` rate limit as
-`/handshake`.
-
 ```json
-{ "developerId": "string", "sceneId": "string", "sceneHash": "string" }
+{ "developerId": "...", "sceneId": "...", "sceneHash": "<64 hex>" }
 ```
 
-->
-
 ```json
-{ "sceneUploadRequired": true, "sceneUploadUrl": "http://host:port/scenes/{sceneId}?developerId=...&sceneHash=..." }
+{ "sceneUploadRequired": true, "sceneUploadUrl": "https://host/scenes/..." }
 ```
 
-`sceneUploadUrl` is present only when `sceneUploadRequired` is `true`, and is built exactly as the
-handshake builds it (`Ingest/SceneCheckEndpoints.cs`).
-
-### Protocol v2 and replay format v2
-
-The stream decoder accepts protocol versions 1 and 2. Version 2 adds the `Log` event (id 33,
-Unity Spec 6.7). `Compiler/SessionReconstructor.cs` reassembles each log from its events (a
-non-zero level starts a log, level 0 appends) and `Compiler/ReplayFileWriter.cs` writes them into
-replay format 2: the header grows to 80 bytes and gains a log table (20 bytes per log: time,
-level, colour, text offset and length) followed by a UTF-8 string blob. `SessionCompiler.Version`
-is 2, so sessions compiled earlier have no logs until they are recompiled.
-
-### Stream heartbeat
-
-The server sends a one-byte `KeepAlive` message (event type 30) down every `/stream` connection
-every `MOODYBLUES_STREAM_HEARTBEAT_SECONDS` (default 10). Without it the origin side of the
-connection is silent, and Cloudflare resets such connections after about 60 s even while Unity
-is streaming. The Unity client discards whatever the server sends.
-
-### Scene optimization pipeline
-
-Every uploaded `.glb` is also queued for a background optimization pass (see
-`Scenes/Processing/SceneProcessingWorker.cs`): it shells out to
-[`gltf-transform optimize`](https://gltf-transform.dev/cli) to dedupe/prune unused data,
-Draco-compress geometry, and convert textures to KTX2/Basis Universal (via KTX-Software's `toktx`,
-also required on `PATH` -- both are installed in the Docker image). This matches the
-`DRACOLoader`/`KTX2Loader` the frontend's GLB viewer already has wired up.
-
-This never blocks the Unity-facing upload response or dashboard viewing -- `POST /scenes/{sceneId}`
-returns as soon as the raw bytes are on disk, and `GET /api/scenes/{developerId}/{sceneId}/file`
-serves the optimized output once it's ready, falling back to the raw upload otherwise (including if
-optimization fails or hasn't finished yet).
-
-The WebSocket connection that follows must include the same `sessionId` as a `?session=` query
-parameter -- it's a single-use token correlating the socket with the handshake that preceded it,
-since the binary event wire protocol itself carries no developer/scene context.
+Same validation and rate limit as the handshake. It doesn't create a session.
 
 ### `POST /scenes/{sceneId}?developerId=...&sceneHash=...`
 
-Raw `.glb` bytes in the request body (`Content-Type: model/gltf-binary`; gzip `Content-Encoding` is
-honored). The file is written as-is to `scenes/{developerId}/{sceneId}.glb` and
-`(developerId, sceneId)`'s stored hash is updated to `sceneHash`, so the next handshake sees it as
-up to date. A background optimization pass is also queued (see "Scene optimization pipeline" below).
-No GLTF parsing happens synchronously in the request itself (see `Scenes/SceneUploadEndpoints.cs`)
--- building a server-side object registry from the file's `node.extras.objectId` values is a later
-milestone.
+- **Body:** the `.glb`, usually with `Content-Encoding: gzip`. An optional
+  `X-MoodyBlues-Skipped-Meshes: <n>` header reports meshes a runtime export couldn't read; the
+  dashboard shows it as a warning on that version.
+- **Versions are immutable.** Uploading a hash that is already stored returns 200 and changes
+  nothing.
+- **A new hash becomes the scene's current version,** and the previous ones are archived. Its
+  waiting sessions are queued.
+- **Storage:** each upload writes its own file under `{ScenesDir}/{developerId}/{sceneId}/{hash}/`,
+  so concurrent uploads of the same hash can't replace each other's file.
+- **Errors:** 404 unknown developer, 400 not a GLB, 413 too large, 507 version or storage quota
+  reached.
+
+The upload is processed in the background (`Scenes/Processing/`):
+1. The **object registry** (`registry.json`) is built from the GLB's `extras.objectId` nodes,
+   with node-count, depth and cycle limits, because the GLB is untrusted input.
+2. `gltf-transform optimize` produces a Draco/KTX2 `optimized.glb` for the viewer. If that fails,
+   the raw upload is served instead.
+
+### `GET /stream?token=...` (WebSocket)
+
+- **Messages:** binary only, each a run of whole events (protocol v1–v3; see `Spec.md`). A
+  message that doesn't decode is recorded as a data gap.
+- **Refused connections:** a wrong protocol version, or a connection that doesn't start with
+  `BeginSession`, is refused.
+- **Message size:** messages up to 160 KB are accepted; the client's largest setting is 128 KB.
 
 ## Dashboard API
 
-Everything below is consumed by the [Moody_FrontEnd](../Moody_FrontEnd) SPA, not by Unity. Every
-route except `/auth/register` and `/auth/login` requires `Authorization: Bearer <token>` (issued by
-those two). Ownership is always enforced server-side -- a user can only see/rename/download their
-own Projects/Scenes.
+Every `/api` route needs `Authorization: Bearer <JWT>` and checks that the caller owns the
+project. Another user's data returns 404, so its existence isn't revealed. Enums are sent as
+names, for example `"Ready"`.
 
-### `POST /auth/register`, `POST /auth/login`
+| Route | Purpose |
+|---|---|
+| `POST /auth/register`, `POST /auth/login` | Create an account / sign in; returns a JWT (7 days) |
+| `GET /auth/me` | The signed-in user |
+| `GET /api/projects`, `POST /api/projects` | List / create projects; creating one issues its Developer ID |
+| `GET /api/projects/{id}` | A project and its scenes (each with its current version number) |
+| `GET /api/scenes/{dev}/{scene}` | The scene: current version, archived versions (newest first, with session counts and sizes), and the number of sessions waiting for an un-uploaded version |
+| `PATCH /api/scenes/{dev}/{scene}` | Rename (`{ "displayName": "..." }`) |
+| `DELETE /api/scenes/{dev}/{scene}` | Delete the scene: closes its live recordings, then removes every version, session and file |
+| `DELETE /api/scenes/{dev}/{scene}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene) |
+| `DELETE /api/scenes/{dev}/{scene}/archive` | Delete every archived version and their sessions |
+| `GET /api/scenes/{dev}/{scene}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
+| `GET /api/scenes/{dev}/{scene}/sessions` | Sessions, newest first, each with its scene version (null while not uploaded) and error message. `?version=n` filters to one version; `?awaitingScene=true` to sessions waiting for their scene |
+| `GET /api/sessions/{id}` | Session details and recording health counters |
+| `GET /api/sessions/{id}/replay` | The compiled replay file (gzip-encoded) |
+| `POST /api/sessions/{id}/recompile` | Rebuild the replay from the raw log |
+| `DELETE /api/sessions/{id}` | Delete one session (not while recording or compiling) |
 
-```json
-{ "email": "you@example.com", "password": "at-least-8-chars" }
-```
+Delete endpoints return `{ "deletedVersions", "deletedSessions", "freedBytes" }`.
 
-->
+## Storage formats
 
-```json
-{ "token": "<jwt>", "userId": "guid", "email": "you@example.com" }
-```
-
-### `GET /auth/me`
-
-Returns `{ "userId": "guid", "email": "..." }` for the caller's token.
-
-### `GET /api/projects`
-
-Lists the caller's projects: `[{ "id", "name", "developerId", "createdAtUtc", "sceneCount" }]`.
-
-### `POST /api/projects`
-
-Body `{ "name": "My Game" }`. Creates a project with a freshly generated, unique `developerId` --
-this is the exact same `developerId` value Unity's `POST /handshake` and `POST /scenes/{sceneId}`
-already key off of (see "HTTP API" above), so pasting it into the Unity client's config is all
-that's needed to start uploading scenes into this project.
-
-### `GET /api/projects/{id}`
-
-Project detail plus its scenes (joined by `developerId`):
-`{ "id", "name", "developerId", "createdAtUtc", "scenes": [{ "sceneId", "displayName", "updatedAtUtc", "sizeBytes", "processingStatus" }] }`.
-`sizeBytes` is the size of whichever file is currently servable (optimized once ready, otherwise the
-raw upload -- see `Scene.ServableSizeBytes`); `processingStatus` is one of `Pending`/`Processing`/`Ready`/`Failed`.
-
-### `PATCH /api/scenes/{developerId}/{sceneId}`
-
-Body `{ "displayName": "Living Room v2" }` (or `null`/blank to clear it). Dashboard-only rename --
-`sceneId` (what Unity/the wire protocol use) is never changed. Response shape matches a single scene
-from the list above (`sceneId, displayName, updatedAtUtc, sizeBytes, processingStatus`).
-
-### `GET /api/scenes/{developerId}/{sceneId}/file`
-
-Streams the stored `.glb` as `model/gltf-binary`. This is what the frontend's rebuilt GLB viewer
-fetches to render the model.
+- **Raw log** (`raw.mblog`): an 8-byte magic, then records.
+  - `MBRAWv02`: `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`.
+  - `MBRAWv01`, from older servers: the same without `connection`. It is still read, and a v01
+    log that is appended to stays v01.
+- **Replay file** (`replay.mbr.gz`): format 2, documented in `Compiler/ReplayFileWriter.cs`.
+  - Object kinds are 0 scene, 1 spawned, and 2 spawned part: a child of a spawned object that the
+    viewer animates inside the clone (protocol v3).
+  - `SessionCompiler.Version` is stored on each session; recompile older sessions to update them.
 
 ## Project layout
 
 ```
 src/MoodyBlues.Backend/
-  Program.cs                  Entry point: ASP.NET Core host, DI wiring, endpoint mapping
-  Config/
-    ServerConfig.cs            Host/port/log/DB/scenes/JWT/CORS settings, read from env vars
-  Common/
-    PathSegments.cs             Validates untrusted IDs before they touch the filesystem/URLs
-    IdGenerator.cs               Short opaque random tokens (Project.DeveloperId)
-  Data/
-    MoodyBluesDbContext.cs      EF Core context (Postgres via Npgsql)
-    Developer.cs, Scene.cs      Entities (Unity-facing)
-    User.cs, Project.cs         Entities (dashboard-facing)
-    DeveloperProvisioning.cs     Shared "create Developer row if missing" logic
-    MoodyBluesDbContextFactory.cs  Design-time factory for `dotnet ef migrations`
-  Migrations/                  EF Core migrations
-  Auth/
-    PasswordHasher.cs            PBKDF2 hash/verify
-    JwtTokenService.cs            Issues/validates dashboard JWTs
-    CurrentUser.cs                 Reads the caller's user id out of JWT claims
-    AuthContracts.cs, AuthEndpoints.cs  POST /auth/register, /auth/login, GET /auth/me
-  Handshake/
-    HandshakeContracts.cs       Request/response DTOs
-    HandshakeEndpoints.cs       POST /handshake
-    PendingSessionStore.cs      In-memory handshake-to-WebSocket session correlation
-  Projects/
-    ProjectContracts.cs, ProjectEndpoints.cs  /api/projects (list/create/detail)
-  Scenes/
-    SceneUploadEndpoints.cs     POST /scenes/{sceneId} (Unity-facing, unauthenticated)
-    SceneContracts.cs, SceneEndpoints.cs  /api/scenes/{developerId}/{sceneId} (dashboard-facing, authorized)
-    Processing/
-      SceneProcessingQueue.cs     In-memory job queue (upload -> background optimization)
-      SceneProcessingWorker.cs    BackgroundService that drains the queue, updates Scene rows
-      IGltfOptimizer.cs, GltfTransformOptimizer.cs  Runs `gltf-transform optimize` (Draco/KTX2)
-  Logging/
-    ConsoleLog.cs                Simple timestamped, colorized console logging
-    RuntimeLogs.cs                binary.log / events.log file writers
-  Protocol/
-    EventType.cs                  Wire event type IDs (Spec.md Section 5)
-    ProtocolConstants.cs          Payload sizes and quantization ranges (Section 7)
-    Quantize.cs                   Dequantization math
-    Events.cs                     One record type per decoded event
-    EventParser.cs                Decodes a raw message into a list of Events
-    EventFormatting.cs             Human-readable rendering of a decoded event
-    ProtocolException.cs           Thrown on malformed input
-  Server/
-    MoodyBluesServer.cs           Per-WebSocket-connection receive/decode loop
-tests/MoodyBlues.Backend.Tests/
-  EncodingHelpers.cs            Test-only encoders mirroring the spec's encode side
-  ProtocolParserTests.cs        Round-trip / known-vector tests for the decoder
-  HandshakeEndpointsTests.cs     Tests for POST /handshake (EF Core InMemory + fake HttpContext)
-  SceneUploadEndpointsTests.cs   Tests for POST /scenes/{sceneId}
-  TestPrincipal.cs               Builds a fake authenticated ClaimsPrincipal for endpoint tests
-  AuthEndpointsTests.cs          Tests for /auth/register, /auth/login
-  ProjectEndpointsTests.cs       Tests for /api/projects
-  SceneEndpointsTests.cs         Tests for /api/scenes/{developerId}/{sceneId} rename + file download
-Dockerfile                      Multi-stage build for the backend image
-docker-compose.yml               Postgres + backend stack definition (see "HTTPS/TLS" for how
-                                  it plugs into an existing reverse proxy)
-deploy.sh                        One-file clone/build/start/stop/reset script for a Linux host
+  Program.cs                 host setup, DI, middleware, endpoint mapping
+  Config/ServerConfig.cs     every setting and quota, from MOODYBLUES_* environment variables
+  Common/                    PathSegments (ID validation), RateLimits, IdGenerator, WorkSignal
+  Data/                      EF Core entities and context, IngestAccess, StorageQuota, DeveloperProvisioning
+  Migrations/                EF Core migrations (applied at startup)
+  Auth/                      registration, login, JWT, password hashing
+  Projects/                  /api/projects
+  Ingest/                    /handshake, /scenes/check, /stream, open-connection tracking, stream tokens
+  Scenes/                    scene upload, dashboard scene routes, versions and deletion, object registry
+  Scenes/Processing/         background registry build and gltf-transform optimization
+  Sessions/                  dashboard session routes
+  Compiler/                  raw log -> replay: reconstruction, curve fitting, replay file writer, worker
+  Protocol/                  wire decoder (v1-v3), event types, dequantization
+  Storage/                   file locations, raw log reader/writer
+  Logging/                   console logging, exception handling
+tests/MoodyBlues.Backend.Tests/   xUnit tests (EF Core InMemory, endpoint handlers called directly)
+Dockerfile, docker-entrypoint.sh, docker-compose.yml, deploy.sh
 ```
-
-## Protocol
-
-See `MoodyBlues_Unity/Spec.md` for the authoritative wire format description. This backend
-implements decoding only for now (no server-side object registry built from uploaded scenes yet)
--- the current milestone is: negotiate whether a scene upload is needed, accept and store it
-as-is, and decode/log every event type on the WebSocket so the wire format can be validated
-end-to-end against the real Unity client.

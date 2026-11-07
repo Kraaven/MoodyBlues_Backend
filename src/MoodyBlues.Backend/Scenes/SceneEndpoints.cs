@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Ingest;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Storage;
 
@@ -20,8 +21,102 @@ public static class SceneEndpoints
     public static void Map(WebApplication app)
     {
         var group = app.MapGroup("/api/scenes/{developerId}/{sceneId}").RequireAuthorization();
+        group.MapGet("/", GetAsync);
         group.MapPatch("/", RenameAsync);
+        group.MapDelete("/", DeleteSceneAsync);
         group.MapGet("/file", DownloadAsync);
+        group.MapDelete("/versions/{version:int}", DeleteVersionAsync);
+        group.MapDelete("/archive", DeleteArchiveAsync);
+    }
+
+    /// <summary>The scene with its current version and every archived version.</summary>
+    public static async Task<IResult> GetAsync(string developerId, string sceneId, ClaimsPrincipal principal, MoodyBluesDbContext db)
+    {
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        return Results.Ok(await ToDetailAsync(scene!, db));
+    }
+
+    /// <summary>
+    /// Deletes the scene: every version, every session recorded in it (live recordings are
+    /// closed first) and all their files. The next upload from any build starts it again at v1.
+    /// </summary>
+    public static async Task<IResult> DeleteSceneAsync(
+        string developerId,
+        string sceneId,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db,
+        StoragePaths paths,
+        ActiveConnections connections)
+    {
+        (IResult? error, Scene? _) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        List<SceneRevision> all = await db.SceneRevisions.Where(r => r.DeveloperId == developerId && r.SceneId == sceneId).ToListAsync();
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, all, deleteScene: true);
+        return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
+    }
+
+    /// <summary>Deletes one archived version and its sessions. The current version cannot be deleted on its own.</summary>
+    public static async Task<IResult> DeleteVersionAsync(
+        string developerId,
+        string sceneId,
+        int version,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db,
+        StoragePaths paths,
+        ActiveConnections connections)
+    {
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        SceneRevision? revision = await db.SceneRevisions
+            .FirstOrDefaultAsync(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Version == version);
+        if (revision is null)
+        {
+            return Results.NotFound("That version does not exist.");
+        }
+
+        if (revision.Hash == scene!.LatestHash)
+        {
+            return Results.Conflict("This is the scene's current version. Delete the scene instead.");
+        }
+
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, [revision], deleteScene: false);
+        return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
+    }
+
+    /// <summary>Deletes every archived version and their sessions, keeping the current version.</summary>
+    public static async Task<IResult> DeleteArchiveAsync(
+        string developerId,
+        string sceneId,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db,
+        StoragePaths paths,
+        ActiveConnections connections)
+    {
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        List<SceneRevision> archived = await db.SceneRevisions
+            .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Hash != scene!.LatestHash)
+            .ToListAsync();
+
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, archived, deleteScene: false);
+        return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
     public static async Task<IResult> RenameAsync(
@@ -108,10 +203,59 @@ public static class SceneEndpoints
             scene.LatestHash,
             latest?.ServableSizeBytes ?? 0,
             latest?.Status ?? SceneProcessingStatus.Pending,
-            revisionCount);
+            revisionCount,
+            latest?.Version ?? 0);
     }
 
-    private static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(
+    internal static async Task<SceneDetailResponse> ToDetailAsync(Scene scene, MoodyBluesDbContext db)
+    {
+        List<SceneRevision> revisions = await db.SceneRevisions
+            .Where(r => r.DeveloperId == scene.DeveloperId && r.SceneId == scene.SceneId)
+            .OrderByDescending(r => r.Version)
+            .ToListAsync();
+
+        var sessionStats = await db.Sessions
+            .Where(s => s.DeveloperId == scene.DeveloperId && s.SceneId == scene.SceneId)
+            .GroupBy(s => s.SceneHash)
+            .Select(g => new { Hash = g.Key, Count = g.Count(), Bytes = g.Sum(s => s.RawLogSizeBytes + s.ReplaySizeBytes) })
+            .ToListAsync();
+        var statsByHash = sessionStats.ToDictionary(x => x.Hash, StringComparer.Ordinal);
+
+        SceneVersionResponse ToVersion(SceneRevision r)
+        {
+            statsByHash.TryGetValue(r.Hash, out var stats);
+            return new SceneVersionResponse(
+                r.Version,
+                r.Hash,
+                r.CreatedAtUtc,
+                r.Hash == scene.LatestHash,
+                r.ServableSizeBytes,
+                r.Status,
+                r.ErrorMessage,
+                r.SkippedMeshCount,
+                r.TrackedObjectCount,
+                stats?.Count ?? 0,
+                stats?.Bytes ?? 0);
+        }
+
+        var known = revisions.Select(r => r.Hash).ToHashSet(StringComparer.Ordinal);
+        int awaiting = sessionStats.Where(s => !known.Contains(s.Hash)).Sum(s => s.Count);
+        long total = revisions.Sum(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0)) + sessionStats.Sum(s => s.Bytes);
+
+        SceneRevision? current = revisions.FirstOrDefault(r => r.Hash == scene.LatestHash);
+        return new SceneDetailResponse(
+            scene.DeveloperId,
+            scene.SceneId,
+            scene.DisplayName,
+            scene.CreatedAtUtc,
+            scene.UpdatedAtUtc,
+            current is null ? null : ToVersion(current),
+            revisions.Where(r => r.Hash != scene.LatestHash).Select(ToVersion).ToList(),
+            awaiting,
+            total);
+    }
+
+    internal static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(
         string developerId,
         string sceneId,
         ClaimsPrincipal principal,

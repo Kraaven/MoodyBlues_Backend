@@ -14,7 +14,10 @@ public sealed record SessionSummaryResponse(
     int SpawnCount,
     long KeyframeCount,
     long ReplaySizeBytes,
-    long RawLogSizeBytes);
+    long RawLogSizeBytes,
+    /// <summary>The scene version the session was recorded in, or null while that version has not been uploaded.</summary>
+    int? SceneVersion,
+    string? ErrorMessage);
 
 public sealed record SessionDetailResponse(
     Guid Id,
