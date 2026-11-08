@@ -88,6 +88,13 @@ public sealed class Session
 
     public long DroppedEvents { get; set; }
 
+    /// <summary>Developer logs in the compiled replay, per level (Unity Spec 6.7). 0 until compiled.</summary>
+    public int InfoLogCount { get; set; }
+
+    public int WarningLogCount { get; set; }
+
+    public int ErrorLogCount { get; set; }
+
     public int CompilerVersion { get; set; }
 
     public DateTime? CompiledAtUtc { get; set; }

@@ -229,10 +229,10 @@ The upload is processed in the background (`Scenes/Processing/`):
 
 ### `GET /stream?token=...` (WebSocket)
 
-- **Messages:** binary only, each a run of whole events (protocol v1–v3; see `Spec.md`). A
+- **Messages:** binary only, each a run of whole events (protocol v3 only; see `Spec.md`). A
   message that doesn't decode is recorded as a data gap.
-- **Refused connections:** a wrong protocol version, or a connection that doesn't start with
-  `BeginSession`, is refused.
+- **Refused connections:** any protocol version other than 3, or a connection that doesn't start
+  with `BeginSession`, is refused.
 - **Message size:** messages up to 160 KB are accepted; the client's largest setting is 128 KB.
 
 ## Dashboard API
@@ -253,8 +253,8 @@ names, for example `"Ready"`.
 | `DELETE /api/scenes/{dev}/{scene}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene) |
 | `DELETE /api/scenes/{dev}/{scene}/archive` | Delete every archived version and their sessions |
 | `GET /api/scenes/{dev}/{scene}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
-| `GET /api/scenes/{dev}/{scene}/sessions` | Sessions, newest first, each with its scene version (null while not uploaded) and error message. `?version=n` filters to one version; `?awaitingScene=true` to sessions waiting for their scene |
-| `GET /api/sessions/{id}` | Session details and recording health counters |
+| `GET /api/scenes/{dev}/{scene}/sessions` | Sessions, newest first, each with its scene version (null while not uploaded), error message and per-level log counts (`infoLogCount`, `warningLogCount`, `errorLogCount`, set when the session compiles). `?version=n` filters to one version; `?awaitingScene=true` to sessions waiting for their scene |
+| `GET /api/sessions/{id}` | Session details, recording health counters and log counts |
 | `GET /api/sessions/{id}/replay` | The compiled replay file (gzip-encoded) |
 | `POST /api/sessions/{id}/recompile` | Rebuild the replay from the raw log |
 | `DELETE /api/sessions/{id}` | Delete one session (not while recording or compiling) |
@@ -263,13 +263,12 @@ Delete endpoints return `{ "deletedVersions", "deletedSessions", "freedBytes" }`
 
 ## Storage formats
 
-- **Raw log** (`raw.mblog`): an 8-byte magic, then records.
-  - `MBRAWv02`: `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`.
-  - `MBRAWv01`, from older servers: the same without `connection`. It is still read, and a v01
-    log that is appended to stays v01.
+- **Raw log** (`raw.mblog`): the 8-byte magic `MBRAWv02`, then records
+  `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`. No older format is read:
+  a session with an older log fails to compile.
 - **Replay file** (`replay.mbr.gz`): format 2, documented in `Compiler/ReplayFileWriter.cs`.
   - Object kinds are 0 scene, 1 spawned, and 2 spawned part: a child of a spawned object that the
-    viewer animates inside the clone (protocol v3).
+    viewer animates inside the clone.
   - `SessionCompiler.Version` is stored on each session; recompile older sessions to update them.
 
 ## Project layout
@@ -288,7 +287,7 @@ src/MoodyBlues.Backend/
   Scenes/Processing/         background registry build and gltf-transform optimization
   Sessions/                  dashboard session routes
   Compiler/                  raw log -> replay: reconstruction, curve fitting, replay file writer, worker
-  Protocol/                  wire decoder (v1-v3), event types, dequantization
+  Protocol/                  wire decoder (v3), event types, dequantization
   Storage/                   file locations, raw log reader/writer
   Logging/                   console logging, exception handling
 tests/MoodyBlues.Backend.Tests/   xUnit tests (EF Core InMemory, endpoint handlers called directly)

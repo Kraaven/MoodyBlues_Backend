@@ -187,11 +187,17 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<bool>("EndedCleanly")
                         .HasColumnType("boolean");
 
+                    b.Property<int>("ErrorLogCount")
+                        .HasColumnType("integer");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
                     b.Property<long>("HardClamps")
                         .HasColumnType("bigint");
+
+                    b.Property<int>("InfoLogCount")
+                        .HasColumnType("integer");
 
                     b.Property<long>("KeyframeCount")
                         .HasColumnType("bigint");
@@ -235,6 +241,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("StreamTokenHash")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int>("WarningLogCount")
+                        .HasColumnType("integer");
 
                     b.HasKey("Id");
 

@@ -210,6 +210,9 @@ public sealed class CompileWorker(
             session.DeltaPromotions = replay.DeltaPromotions;
             session.HardClamps = replay.HardClamps;
             session.DroppedEvents = replay.DroppedEvents;
+            session.InfoLogCount = replay.Logs.Count(l => l.Level == 1);
+            session.WarningLogCount = replay.Logs.Count(l => l.Level == 2);
+            session.ErrorLogCount = replay.Logs.Count(l => l.Level == 3);
             session.EndedCleanly = session.EndedCleanly || replay.EndedCleanly;
             session.CompilerVersion = SessionCompiler.Version;
             session.CompiledAtUtc = DateTime.UtcNow;

@@ -71,7 +71,6 @@ public sealed class SessionReconstructor : IWireEventSink
     private readonly Dictionary<ushort, SceneRegistryObject> _registry;
     private readonly List<SceneRegistryObject> _registryOrdered;
     private readonly Dictionary<ushort, ushort[]> _templateDescendants = new();
-    private ushort _protocolVersion;
     private readonly FitTolerances _tolerances;
     private readonly List<ReplayEvent> _events = [];
 
@@ -146,16 +145,13 @@ public sealed class SessionReconstructor : IWireEventSink
 
     public void Apply(RawLogRecord record)
     {
-        // Logs written before connection indexes existed attribute every record to the most
-        // recently opened connection, which is how they were always read.
-        uint connection = record.Connection == RawLogFormat.UnknownConnection ? _latestConnection : record.Connection;
+        uint connection = record.Connection;
 
         switch (record.Kind)
         {
             case RawLogRecordKind.ConnectionOpened:
             {
-                uint index = record.Payload.Length >= 4 ? BinaryPrimitives.ReadUInt32LittleEndian(record.Payload.Span) : (uint)_connectionCount;
-                if (record.Connection != RawLogFormat.UnknownConnection) index = record.Connection;
+                uint index = record.Connection;
                 _latestConnection = index;
                 _decoders[index] = new WireDecoder(requireBeginSession: true);
                 _connectionCount++;
@@ -176,8 +172,8 @@ public sealed class SessionReconstructor : IWireEventSink
                 }
                 catch (ProtocolException)
                 {
-                    // Messages were validated at ingest with the same rules, so this only happens
-                    // for logs written by an older server. Record the gap rather than failing.
+                    // Messages were validated at ingest with the same rules, so this means the
+                    // log is damaged. Record the gap rather than failing.
                     AddMarker(ReplayEventType.DataGap, 0, 0);
                 }
 
@@ -269,8 +265,6 @@ public sealed class SessionReconstructor : IWireEventSink
             _ranges = info.Ranges;
             _rangesKnown = true;
         }
-
-        _protocolVersion = info.ProtocolVersion;
     }
 
     public void OnKeepAlive() => _rawEventCount++;
@@ -360,16 +354,12 @@ public sealed class SessionReconstructor : IWireEventSink
         if (o.Known)
         {
             Sample(o, TransformFields.Position | TransformFields.Rotation | TransformFields.Scale, discontinuity: false);
-
-            if (_protocolVersion >= ProtocolConstants.CompactVersion)
-            {
-                SpawnSubtree(objectId, templateObjectId);
-            }
+            SpawnSubtree(objectId, templateObjectId);
         }
     }
 
     /// <summary>
-    /// Protocol v3: the client registered the clone's whole subtree with consecutive IDs after the
+    /// The client registered the clone's whole subtree with consecutive IDs after the
     /// root's, in walk order. The template's tracked descendants, in ascending ObjectID order
     /// (which is walk order), map one to one onto that block. Each starts at its template node's
     /// local pose; the client sends an absolute transform for any that did not.

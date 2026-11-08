@@ -45,7 +45,6 @@ public sealed class WireDecoder
     public void Validate(ReadOnlySpan<byte> message)
     {
         bool begun = HasBegunSession;
-        ushort version = ProtocolVersion;
         int offset = 0;
         while (offset < message.Length)
         {
@@ -53,22 +52,22 @@ public sealed class WireDecoder
 
             if (type == (byte)EventType.BeginSession)
             {
-                // The layout after the version depends on the version, so read it first.
+                // Checked before the size: an older client's BeginSession has a different length.
                 if (offset + 3 > message.Length)
                 {
                     throw new ProtocolException($"Truncated BeginSession at offset {offset}.");
                 }
 
-                version = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2));
-                if (version < ProtocolConstants.MinProtocolVersion || version > ProtocolConstants.ProtocolVersion)
+                ushort version = BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2));
+                if (version != ProtocolConstants.ProtocolVersion)
                 {
                     throw new ProtocolException(
-                        $"Unsupported protocol version {version}; this server implements " +
-                        $"{ProtocolConstants.MinProtocolVersion}-{ProtocolConstants.ProtocolVersion}.");
+                        $"Unsupported protocol version {version}; this server implements only " +
+                        $"version {ProtocolConstants.ProtocolVersion}. Update the Unity client.");
                 }
             }
 
-            int size = EventSize(type, offset, version);
+            int size = EventSize(type, offset);
             if (offset + size > message.Length)
             {
                 throw new ProtocolException(
@@ -77,7 +76,7 @@ public sealed class WireDecoder
 
             if (type == (byte)EventType.BeginSession)
             {
-                (_, WireRanges ranges) = ReadSettings(message.Slice(offset, size), version);
+                (_, WireRanges ranges) = ReadSettings(message.Slice(offset, size));
                 if (!ranges.IsValid)
                 {
                     throw new ProtocolException("BeginSession declares invalid quantization ranges.");
@@ -115,32 +114,28 @@ public sealed class WireDecoder
         _ => -1,
     };
 
-    private static int EventSize(byte type, int offset, ushort version) => type switch
+    private static int EventSize(byte type, int offset) => type switch
     {
         (byte)EventType.TimeStamp => ProtocolConstants.TimeStampSize,
-        (byte)EventType.BeginSession => ProtocolConstants.BeginSessionSizeFor(version),
+        (byte)EventType.BeginSession => ProtocolConstants.BeginSessionSize,
         (byte)EventType.KeepAlive => ProtocolConstants.KeepAliveSize,
         (byte)EventType.EndSession => ProtocolConstants.EndSessionSize,
-        (byte)EventType.Log => ProtocolConstants.LogSizeFor(version),
+        (byte)EventType.Log => ProtocolConstants.LogSize,
         _ when ProtocolConstants.TryGetPayloadSize(type, out int payload) => ProtocolConstants.EnvelopeSize + payload,
         _ => throw new ProtocolException($"Unknown event type {type} at offset {offset}."),
     };
 
     /// <summary>
-    /// Capture rate and the 7 tunable ranges from a whole BeginSession event: float32 up to v2,
-    /// float16 from v3. The client applies the decoded float16 values to itself, so both sides
-    /// use bit-identical ranges.
+    /// Capture rate and the 7 tunable ranges from a whole BeginSession event, as float16. The
+    /// client applies the decoded float16 values to itself, so both sides use bit-identical ranges.
     /// </summary>
-    private static (float CaptureHz, WireRanges Ranges) ReadSettings(ReadOnlySpan<byte> evt, ushort version)
+    private static (float CaptureHz, WireRanges Ranges) ReadSettings(ReadOnlySpan<byte> evt)
     {
         ReadOnlySpan<byte> d = evt[3..];
         Span<float> v = stackalloc float[8];
-        bool compact = version >= ProtocolConstants.CompactVersion;
         for (int i = 0; i < v.Length; i++)
         {
-            v[i] = compact
-                ? (float)BinaryPrimitives.ReadHalfLittleEndian(d[(i * 2)..])
-                : BinaryPrimitives.ReadSingleLittleEndian(d[(i * 4)..]);
+            v[i] = (float)BinaryPrimitives.ReadHalfLittleEndian(d[(i * 2)..]);
         }
 
         return (v[0], new WireRanges(v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
@@ -152,10 +147,7 @@ public sealed class WireDecoder
         while (offset < message.Length)
         {
             byte type = message[offset];
-            ushort version = type == (byte)EventType.BeginSession
-                ? BinaryPrimitives.ReadUInt16LittleEndian(message.Slice(offset + 1, 2))
-                : ProtocolVersion;
-            int size = EventSize(type, offset, version);
+            int size = EventSize(type, offset);
             ReadOnlySpan<byte> evt = message.Slice(offset, size);
             offset += size;
 
@@ -167,7 +159,8 @@ public sealed class WireDecoder
 
                 case EventType.BeginSession:
                 {
-                    (float captureHz, WireRanges ranges) = ReadSettings(evt, version);
+                    (float captureHz, WireRanges ranges) = ReadSettings(evt);
+                    ushort version = BinaryPrimitives.ReadUInt16LittleEndian(evt[1..]);
                     var info = new BeginSessionInfo(version, captureHz, ranges);
                     Ranges = info.Ranges;
                     ProtocolVersion = version;
@@ -192,7 +185,7 @@ public sealed class WireDecoder
                 case EventType.Log:
                 {
                     // Text is zero-padded; it ends at the first zero byte.
-                    ReadOnlySpan<byte> text = evt.Slice(2, ProtocolConstants.LogTextBytesFor(ProtocolVersion));
+                    ReadOnlySpan<byte> text = evt.Slice(2, ProtocolConstants.LogTextBytes);
                     int end = text.IndexOf((byte)0);
                     sink.OnLog(evt[1], end < 0 ? text : text[..end]);
                     continue;

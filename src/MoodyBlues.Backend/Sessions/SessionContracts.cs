@@ -17,7 +17,10 @@ public sealed record SessionSummaryResponse(
     long RawLogSizeBytes,
     /// <summary>The scene version the session was recorded in, or null while that version has not been uploaded.</summary>
     int? SceneVersion,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    int InfoLogCount,
+    int WarningLogCount,
+    int ErrorLogCount);
 
 public sealed record SessionDetailResponse(
     Guid Id,
@@ -41,4 +44,7 @@ public sealed record SessionDetailResponse(
     long DroppedEvents,
     int CompilerVersion,
     DateTime? CompiledAtUtc,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    int InfoLogCount,
+    int WarningLogCount,
+    int ErrorLogCount);

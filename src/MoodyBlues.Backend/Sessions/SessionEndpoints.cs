@@ -82,7 +82,10 @@ public static class SessionEndpoints
                     .Where(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash)
                     .Select(r => (int?)r.Version)
                     .FirstOrDefault(),
-                s.ErrorMessage))
+                s.ErrorMessage,
+                s.InfoLogCount,
+                s.WarningLogCount,
+                s.ErrorLogCount))
             .ToListAsync();
 
         return Results.Ok(sessions);
@@ -100,7 +103,7 @@ public static class SessionEndpoints
             s!.Id, s.DeveloperId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
             s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.RawEventCount, s.KeyframeCount,
             s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents,
-            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage));
+            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount));
     }
 
     /// <summary>

@@ -20,22 +20,15 @@ public sealed class WireBuilder
 
     public WireBuilder BeginSession(float captureHz = 40f, ushort version = ProtocolConstants.ProtocolVersion)
     {
-        var b = new byte[ProtocolConstants.BeginSessionSizeFor(version)];
+        var b = new byte[ProtocolConstants.BeginSessionSize];
         b[0] = (byte)EventType.BeginSession;
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(1), version);
         WireRanges r = Ranges;
         float[] values = [captureHz, r.PositionRange, r.ScaleMin, r.ScaleMax, r.DeltaPositionRange, r.DeltaRotationComponentRange, r.DeltaSingleAxisAngleRange, r.DeltaScaleRange];
         for (int i = 0; i < values.Length; i++)
         {
-            // v3 sends the settings as float16, like the Unity client.
-            if (version >= ProtocolConstants.CompactVersion)
-            {
-                BinaryPrimitives.WriteHalfLittleEndian(b.AsSpan(3 + (i * 2)), (Half)values[i]);
-            }
-            else
-            {
-                BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(3 + (i * 4)), values[i]);
-            }
+            // Settings are float16, like the Unity client sends them.
+            BinaryPrimitives.WriteHalfLittleEndian(b.AsSpan(3 + (i * 2)), (Half)values[i]);
         }
 
         _bytes.AddRange(b);

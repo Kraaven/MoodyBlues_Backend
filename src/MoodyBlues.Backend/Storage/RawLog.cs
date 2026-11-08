@@ -28,47 +28,32 @@ public enum RawLogCloseReason : byte
     ServerShutdown = 3,
 }
 
-/// <summary>
-/// One record read back from a raw log. <see cref="Connection"/> is the index of the connection
-/// the record belongs to, or <see cref="RawLogFormat.UnknownConnection"/> for records from a
-/// version-1 log, which did not store it.
-/// </summary>
-public readonly record struct RawLogRecord(RawLogRecordKind Kind, long ReceivedUnixMs, ReadOnlyMemory<byte> Payload, uint Connection = RawLogFormat.UnknownConnection);
+/// <summary>One record read back from a raw log. <see cref="Connection"/> is the index of the connection the record belongs to.</summary>
+public readonly record struct RawLogRecord(RawLogRecordKind Kind, long ReceivedUnixMs, ReadOnlyMemory<byte> Payload, uint Connection);
 
 /// <summary>
 /// The append-only raw log of a session: every validated WebSocket message the client sent, in
 /// order, with connection boundaries. It is the source of truth for the session; the compiled
 /// replay file is derived from it and can be rebuilt at any time.
 ///
-/// Layout: an 8-byte magic, then little-endian records.
-/// <list type="bullet">
-/// <item><c>"MBRAWv01"</c>: <c>[u8 kind][u32 payloadLength][i64 receivedUnixMs][payload]</c>.</item>
-/// <item><c>"MBRAWv02"</c>: <c>[u8 kind][u32 payloadLength][i64 receivedUnixMs][u32 connection][payload]</c>.
-///   The connection index lets the compiler keep each connection's messages apart: a client that
-///   reconnects before the server notices its old connection died has two open at once, and their
-///   records interleave.</item>
-/// </list>
-/// New logs are written as v02. A v01 log that is appended to (a session started on an older
-/// server) stays v01. A crash can leave a truncated final record; <see cref="RawLogReader"/> ignores it.
+/// Layout: the 8-byte magic <c>"MBRAWv02"</c>, then little-endian records
+/// <c>[u8 kind][u32 payloadLength][i64 receivedUnixMs][u32 connection][payload]</c>. The
+/// connection index lets the compiler keep each connection's messages apart: a client that
+/// reconnects before the server notices its old connection died has two open at once, and their
+/// records interleave. No other format is read. A crash can leave a truncated final record;
+/// <see cref="RawLogReader"/> ignores it.
 /// </summary>
 public static class RawLogFormat
 {
-    public static readonly byte[] MagicV1 = Encoding.ASCII.GetBytes("MBRAWv01");
-    public static readonly byte[] MagicV2 = Encoding.ASCII.GetBytes("MBRAWv02");
+    public static readonly byte[] Magic = Encoding.ASCII.GetBytes("MBRAWv02");
 
     public const int MagicSize = 8;
-    public const int RecordHeaderSizeV1 = 1 + 4 + 8;
-    public const int RecordHeaderSizeV2 = 1 + 4 + 8 + 4;
-    public const uint UnknownConnection = uint.MaxValue;
+    public const int RecordHeaderSize = 1 + 4 + 8 + 4;
 
     /// <summary>Records larger than this are treated as corruption.</summary>
     public const int MaxRecordPayload = 16 * 1024 * 1024;
 
-    /// <summary>1 or 2 for a recognised magic, otherwise 0.</summary>
-    public static int VersionOf(ReadOnlySpan<byte> magic) =>
-        magic.SequenceEqual(MagicV2) ? 2 : magic.SequenceEqual(MagicV1) ? 1 : 0;
-
-    public static int HeaderSize(int version) => version >= 2 ? RecordHeaderSizeV2 : RecordHeaderSizeV1;
+    public static bool IsMagic(ReadOnlySpan<byte> magic) => magic.SequenceEqual(Magic);
 }
 
 /// <summary>
@@ -80,8 +65,7 @@ public sealed class RawLogWriter : IDisposable
 {
     private readonly FileStream _stream;
     private readonly object _sync = new();
-    private readonly int _version;
-    private readonly byte[] _header;
+    private readonly byte[] _header = new byte[RawLogFormat.RecordHeaderSize];
     private uint _lastOpenedConnection;
 
     internal int RefCount;
@@ -92,18 +76,16 @@ public sealed class RawLogWriter : IDisposable
         _stream = new FileStream(fullPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
         if (_stream.Length == 0)
         {
-            _stream.Write(RawLogFormat.MagicV2);
-            _version = 2;
+            _stream.Write(RawLogFormat.Magic);
         }
         else
         {
             var magic = new byte[RawLogFormat.MagicSize];
             _stream.ReadExactly(magic);
-            _version = RawLogFormat.VersionOf(magic);
-            if (_version == 0)
+            if (!RawLogFormat.IsMagic(magic))
             {
                 _stream.Dispose();
-                throw new InvalidDataException($"Not a MoodyBlues raw log (bad magic): {fullPath}");
+                throw new InvalidDataException($"Not a current MoodyBlues raw log (bad or outdated magic): {fullPath}");
             }
 
             // A crash can leave a half-written final record. Appending after it would hide every
@@ -116,8 +98,6 @@ public sealed class RawLogWriter : IDisposable
 
             _stream.Seek(0, SeekOrigin.End);
         }
-
-        _header = new byte[RawLogFormat.HeaderSize(_version)];
     }
 
     public long Length
@@ -142,10 +122,7 @@ public sealed class RawLogWriter : IDisposable
             _header[0] = (byte)kind;
             BinaryPrimitives.WriteUInt32LittleEndian(_header.AsSpan(1), (uint)payload.Length);
             BinaryPrimitives.WriteInt64LittleEndian(_header.AsSpan(5), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            if (_version >= 2)
-            {
-                BinaryPrimitives.WriteUInt32LittleEndian(_header.AsSpan(13), connection);
-            }
+            BinaryPrimitives.WriteUInt32LittleEndian(_header.AsSpan(13), connection);
 
             _stream.Write(_header);
             _stream.Write(payload);
@@ -236,21 +213,18 @@ public static class RawLogReader
     public static IEnumerable<RawLogRecord> Read(Stream stream)
     {
         var magic = new byte[RawLogFormat.MagicSize];
-        int version = TryReadExactly(stream, magic) ? RawLogFormat.VersionOf(magic) : 0;
-        if (version == 0)
+        if (!TryReadExactly(stream, magic) || !RawLogFormat.IsMagic(magic))
         {
-            throw new InvalidDataException("Not a MoodyBlues raw log (bad magic).");
+            throw new InvalidDataException("Not a current MoodyBlues raw log (bad or outdated magic).");
         }
 
-        var header = new byte[RawLogFormat.HeaderSize(version)];
+        var header = new byte[RawLogFormat.RecordHeaderSize];
         while (TryReadExactly(stream, header))
         {
             var kind = (RawLogRecordKind)header[0];
             uint length = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(1));
             long received = BinaryPrimitives.ReadInt64LittleEndian(header.AsSpan(5));
-            uint connection = version >= 2
-                ? BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(13))
-                : RawLogFormat.UnknownConnection;
+            uint connection = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(13));
             if (length > RawLogFormat.MaxRecordPayload)
             {
                 yield break; // corrupt length; treat as end of usable data
@@ -271,14 +245,13 @@ public static class RawLogReader
     {
         using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
         var magic = new byte[RawLogFormat.MagicSize];
-        int version = TryReadExactly(stream, magic) ? RawLogFormat.VersionOf(magic) : 0;
-        if (version == 0)
+        if (!TryReadExactly(stream, magic) || !RawLogFormat.IsMagic(magic))
         {
-            throw new InvalidDataException($"Not a MoodyBlues raw log (bad magic): {fullPath}");
+            throw new InvalidDataException($"Not a current MoodyBlues raw log (bad or outdated magic): {fullPath}");
         }
 
         long validEnd = stream.Position;
-        var header = new byte[RawLogFormat.HeaderSize(version)];
+        var header = new byte[RawLogFormat.RecordHeaderSize];
         while (TryReadExactly(stream, header))
         {
             uint length = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(1));

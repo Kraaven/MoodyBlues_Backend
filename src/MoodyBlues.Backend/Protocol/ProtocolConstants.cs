@@ -7,18 +7,11 @@ namespace MoodyBlues.Backend.Protocol;
 /// </summary>
 public static class ProtocolConstants
 {
-    /// <summary>Newest protocol version this decoder implements (Spec 6.1, BeginSession).</summary>
-    public const ushort ProtocolVersion = 3;
-
     /// <summary>
-    /// Oldest version still accepted. Version 2 added the Log event. Version 3 shrank BeginSession
-    /// (settings as 16-bit floats) and Log (30 text bytes) so no event exceeds 32 bytes, and made
-    /// InstantiateObject cover the spawned object's whole subtree.
+    /// The only protocol version this decoder accepts (Spec 6.1, BeginSession). Older versions are
+    /// not supported: the project is in early alpha, so there are no older clients to serve.
     /// </summary>
-    public const ushort MinProtocolVersion = 1;
-
-    /// <summary>First version with 16-bit BeginSession settings, 32-byte Log events and subtree spawns.</summary>
-    public const ushort CompactVersion = 3;
+    public const ushort ProtocolVersion = 3;
 
     /// <summary>EventType + ObjectID, carried by every event except the session maintenance ones.</summary>
     public const int EnvelopeSize = 3;
@@ -27,30 +20,17 @@ public static class ProtocolConstants
     public const int KeepAliveSize = 1;
     public const int EndSessionSize = 18;
 
-    /// <summary>type + version + captureHz + 7 ranges, as float32 (v1-v2).</summary>
-    public const int BeginSessionSizeV2 = 1 + 2 + (8 * 4);
+    /// <summary>type + version + captureHz + 7 ranges, as float16.</summary>
+    public const int BeginSessionSize = 1 + 2 + (8 * 2);
 
-    /// <summary>type + version + captureHz + 7 ranges, as float16 (v3).</summary>
-    public const int BeginSessionSizeV3 = 1 + 2 + (8 * 2);
-
-    /// <summary>Kept for callers that only deal with the original layout.</summary>
-    public const int BeginSessionSize = BeginSessionSizeV2;
-
-    /// <summary>UTF-8 text bytes carried by one Log event (zero-padded), v2.</summary>
-    public const int LogTextBytesV2 = 33;
-
-    /// <summary>UTF-8 text bytes carried by one Log event (zero-padded), v3.</summary>
-    public const int LogTextBytesV3 = 30;
-
-    public static int BeginSessionSizeFor(ushort version) => version >= CompactVersion ? BeginSessionSizeV3 : BeginSessionSizeV2;
-
-    public static int LogTextBytesFor(ushort version) => version >= CompactVersion ? LogTextBytesV3 : LogTextBytesV2;
+    /// <summary>UTF-8 text bytes carried by one Log event (zero-padded).</summary>
+    public const int LogTextBytes = 30;
 
     /// <summary>type + style + text.</summary>
-    public static int LogSizeFor(ushort version) => 2 + LogTextBytesFor(version);
+    public const int LogSize = 2 + LogTextBytes;
 
-    /// <summary>Largest single event across every supported version (BeginSession and Log, v1-v2).</summary>
-    public const int MaxEventSize = BeginSessionSizeV2;
+    /// <summary>Largest single event (Log).</summary>
+    public const int MaxEventSize = LogSize;
 
     /// <summary>Absolute rotations use smallest-three over +/- 1/sqrt(2). Not tunable (Spec 9.5).</summary>
     public const float TrueRotationComponentRange = 0.70711f;
