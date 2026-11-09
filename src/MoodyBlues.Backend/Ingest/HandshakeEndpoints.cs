@@ -22,19 +22,18 @@ public static class HandshakeEndpoints
     }
 
     /// <summary>Public so tests can call it directly against an in-memory database.</summary>
-    public static async Task<IResult> HandleAsync(HandshakeRequest request, MoodyBluesDbContext db, ServerConfig config)
+    public static async Task<IResult> HandleAsync(HandshakeRequest request, HttpRequest httpRequest, MoodyBluesDbContext db, ServerConfig config)
     {
-        if (string.IsNullOrWhiteSpace(request.DeveloperId) ||
-            string.IsNullOrWhiteSpace(request.SceneId) ||
+        if (string.IsNullOrWhiteSpace(request.SceneId) ||
             string.IsNullOrWhiteSpace(request.SceneHash) ||
             string.IsNullOrWhiteSpace(request.SessionId))
         {
-            return Results.BadRequest("developerId, sceneId, sceneHash, and sessionId are all required.");
+            return Results.BadRequest("sceneId, sceneHash and sessionId are all required.");
         }
 
-        if (!PathSegments.IsSafe(request.DeveloperId) || !PathSegments.IsSafe(request.SceneId) || !PathSegments.IsSafe(request.SessionId))
+        if (!PathSegments.IsSafe(request.SceneId) || !PathSegments.IsSafe(request.SessionId))
         {
-            return Results.BadRequest("developerId, sceneId and sessionId may only contain letters, digits, '-' and '_'.");
+            return Results.BadRequest("sceneId and sessionId may only contain letters, digits, '-' and '_'.");
         }
 
         if (!PathSegments.IsSceneHash(request.SceneHash))
@@ -42,21 +41,24 @@ public static class HandshakeEndpoints
             return Results.BadRequest("sceneHash must be 64 lowercase hex characters.");
         }
 
-        if (!await IngestAccess.IsRegisteredDeveloperAsync(db, request.DeveloperId))
+        (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, httpRequest);
+        if (denied is not null)
         {
-            return Results.NotFound(IngestAccess.UnknownDeveloperMessage);
+            return denied;
         }
 
+        string developerId = project!.DeveloperId;
+
         // A retried handshake (same client run) reuses the session; a fresh token is issued and
-        // the old one stops working, so only the latest URL the client was given is valid.
+        // the old one stops working, so only the latest token the client was given is valid.
         string token = StreamTokens.NewToken();
         Session? session = await db.Sessions.FirstOrDefaultAsync(s =>
-            s.DeveloperId == request.DeveloperId && s.ClientSessionId == request.SessionId);
+            s.DeveloperId == developerId && s.ClientSessionId == request.SessionId);
 
         if (session is null)
         {
             if (config.MaxConcurrentSessionsPerDeveloper > 0 &&
-                await db.Sessions.CountAsync(s => s.DeveloperId == request.DeveloperId && s.Status == SessionStatus.Recording)
+                await db.Sessions.CountAsync(s => s.DeveloperId == developerId && s.Status == SessionStatus.Recording)
                     >= config.MaxConcurrentSessionsPerDeveloper)
             {
                 return Results.Problem(
@@ -69,7 +71,7 @@ public static class HandshakeEndpoints
             session = new Session
             {
                 Id = id,
-                DeveloperId = request.DeveloperId,
+                DeveloperId = developerId,
                 SceneId = request.SceneId,
                 SceneHash = request.SceneHash,
                 ClientSessionId = request.SessionId,
@@ -77,7 +79,7 @@ public static class HandshakeEndpoints
                 Status = SessionStatus.Recording,
                 CreatedAtUtc = now,
                 LastActivityUtc = now,
-                RawLogPath = Path.Combine(StoragePaths.SessionDir(request.DeveloperId, id), StoragePaths.RawLogFile),
+                RawLogPath = Path.Combine(StoragePaths.SessionDir(developerId, id), StoragePaths.RawLogFile),
             };
             db.Sessions.Add(session);
         }
@@ -94,18 +96,20 @@ public static class HandshakeEndpoints
         await db.SaveChangesAsync();
 
         bool sceneUploadRequired = !await db.SceneRevisions.AnyAsync(r =>
-            r.DeveloperId == request.DeveloperId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);
+            r.DeveloperId == developerId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);
 
+        // The stream token travels in a header (StreamServer.TokenHeader), not the URL, so it never
+        // lands in proxy access logs.
         string hostAndPort = config.PublicHostAndPort();
-        string webSocketUrl = $"{(config.IsHttps ? "wss" : "ws")}://{hostAndPort}/stream?token={token}";
+        string webSocketUrl = $"{(config.IsHttps ? "wss" : "ws")}://{hostAndPort}/stream";
         string? sceneUploadUrl = sceneUploadRequired
-            ? SceneCheckEndpoints.BuildSceneUploadUrl(config, request.DeveloperId, request.SceneId, request.SceneHash)
+            ? SceneCheckEndpoints.BuildSceneUploadUrl(config, request.SceneId, request.SceneHash)
             : null;
 
         ConsoleLog.Info(
-            $"Handshake: developer={request.DeveloperId} scene={request.SceneId} session={session.Id} " +
+            $"Handshake: developer={developerId} scene={request.SceneId} session={session.Id} " +
             $"sceneUploadRequired={sceneUploadRequired}");
 
-        return Results.Ok(new HandshakeResponse(webSocketUrl, sceneUploadRequired, sceneUploadUrl));
+        return Results.Ok(new HandshakeResponse(webSocketUrl, token, sceneUploadRequired, sceneUploadUrl));
     }
 }

@@ -36,7 +36,7 @@ public class DashboardEndpointsTests : IDisposable
         var db = TestDbContextFactory.Create();
         Guid user = Guid.NewGuid();
         var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(
-            await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Game"), TestPrincipal.For(user), db));
+            await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Game"), TestPrincipal.For(user), db, TestProjects.Protector));
         string dev = created!.DeveloperId;
 
         foreach (string hash in new[] { HashA, HashB })
@@ -85,7 +85,7 @@ public class DashboardEndpointsTests : IDisposable
         Project project = db.Projects.Single();
 
         var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectDetailResponse>(
-            await ProjectEndpoints.GetAsync(project.Id, TestPrincipal.For(user), db));
+            await ProjectEndpoints.GetAsync(project.Id, TestPrincipal.For(user), db, TestProjects.Config, TestProjects.Protector));
 
         SceneResponse scene = Assert.Single(detail!.Scenes);
         Assert.Equal(HashB, scene.LatestHash);

@@ -7,12 +7,19 @@ using MoodyBlues.Backend.Data;
 
 namespace MoodyBlues.Backend.Auth;
 
-/// <summary>Issues and validates the JWTs the dashboard SPA sends as <c>Authorization: Bearer ...</c>.</summary>
+/// <summary>
+/// Issues and validates the dashboard's short-lived access tokens (JWT, HS256). The dashboard never
+/// sees them: they travel in an httpOnly cookie (<see cref="AuthCookies"/>), renewed through
+/// <c>POST /auth/refresh</c>. A Bearer header is still accepted, for scripts and tests.
+/// </summary>
 public sealed class JwtTokenService(ServerConfig config)
 {
-    private static readonly TimeSpan TokenLifetime = TimeSpan.FromDays(7);
-
     public const string UserIdClaimType = ClaimTypes.NameIdentifier;
+
+    private const string Issuer = "moodyblues-backend";
+    private const string Audience = "moodyblues-dashboard";
+
+    public TimeSpan AccessTokenLifetime => config.AccessTokenLifetime;
 
     public string IssueToken(User user)
     {
@@ -26,10 +33,10 @@ public sealed class JwtTokenService(ServerConfig config)
         };
 
         var token = new JwtSecurityToken(
-            issuer: "moodyblues-backend",
-            audience: "moodyblues-dashboard",
+            issuer: Issuer,
+            audience: Audience,
             claims: claims,
-            expires: DateTime.UtcNow.Add(TokenLifetime),
+            expires: DateTime.UtcNow.Add(config.AccessTokenLifetime),
             signingCredentials: credentials);
 
         return new JwtSecurityTokenHandler().WriteToken(token);
@@ -40,13 +47,13 @@ public sealed class JwtTokenService(ServerConfig config)
         return new TokenValidationParameters
         {
             ValidateIssuer = true,
-            ValidIssuer = "moodyblues-backend",
+            ValidIssuer = Issuer,
             ValidateAudience = true,
-            ValidAudience = "moodyblues-dashboard",
+            ValidAudience = Audience,
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config.JwtSecret)),
             ValidateLifetime = true,
-            ClockSkew = TimeSpan.FromMinutes(1),
+            ClockSkew = TimeSpan.FromSeconds(30),
         };
     }
 }

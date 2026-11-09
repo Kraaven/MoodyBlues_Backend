@@ -26,6 +26,15 @@ if (config.JwtSecret == ServerConfig.InsecureDefaultJwtSecret)
 {
     ConsoleLog.Warn("MOODYBLUES_JWT_SECRET is not set; using the insecure development default. Set it before deploying.");
 }
+else if (System.Text.Encoding.UTF8.GetByteCount(config.JwtSecret) < 32)
+{
+    throw new InvalidOperationException("MOODYBLUES_JWT_SECRET must be at least 32 bytes long.");
+}
+
+if (config.CorsOrigins.Contains("*"))
+{
+    throw new InvalidOperationException("MOODYBLUES_CORS_ORIGIN cannot be '*': the dashboard sends credentials. List the dashboard's origins.");
+}
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls($"http://{config.Host}:{config.Port}");
@@ -38,6 +47,7 @@ builder.Services.AddSingleton<SceneWorkSignal>();
 builder.Services.AddSingleton<CompileWorkSignal>();
 builder.Services.AddSingleton<StreamServer>();
 builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddSingleton<IngestKeyProtector>();
 builder.Services.AddScoped<IGltfOptimizer, GltfTransformOptimizer>();
 builder.Services.AddHostedService<SceneProcessingWorker>();
 builder.Services.AddHostedService<CompileWorker>();
@@ -53,11 +63,29 @@ builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.C
 builder.Services.AddCors(options => options.AddPolicy("dashboard", policy => policy
     .WithOrigins(config.CorsOrigins)
     .AllowAnyHeader()
-    .AllowAnyMethod()));
+    .AllowAnyMethod()
+    // The dashboard signs in with httpOnly cookies, so its requests carry credentials.
+    .AllowCredentials()));
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options => options.TokenValidationParameters = new JwtTokenService(config).BuildValidationParameters());
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new JwtTokenService(config).BuildValidationParameters();
+        options.Events = new JwtBearerEvents
+        {
+            // The dashboard's access token is in an httpOnly cookie; a Bearer header still wins.
+            OnMessageReceived = context =>
+            {
+                if (string.IsNullOrEmpty(context.Token) && context.Request.Cookies.TryGetValue(AuthCookies.AccessCookie, out string? cookie))
+                {
+                    context.Token = cookie;
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+    });
 builder.Services.AddAuthorization();
 
 if (trustForwardedHeaders)
@@ -86,7 +114,9 @@ if (trustForwardedHeaders)
 }
 
 app.UseGlobalExceptionHandling(config);
+app.UseSecurityHeaders(config);
 app.UseCors("dashboard");
+app.UseCsrfProtection();
 app.UseRequestDecompression();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
 app.UseRateLimiter();

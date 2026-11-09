@@ -24,3 +24,5 @@ logs/
 
 .dev-db.pid
 .dev-server.pid
+# deploy.sh backup output (database dumps and user files)
+/backups/

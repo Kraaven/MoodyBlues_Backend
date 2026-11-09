@@ -20,6 +20,10 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
 
     public DbSet<Session> Sessions => Set<Session>();
 
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+
+    public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Developer>(entity => entity.HasKey(d => d.Id));
@@ -49,6 +53,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
         {
             entity.HasKey(p => p.Id);
             entity.HasIndex(p => p.DeveloperId).IsUnique();
+            entity.HasIndex(p => p.IngestKeyHash).IsUnique();
             entity.HasOne<User>().WithMany().HasForeignKey(p => p.UserId);
         });
 
@@ -63,6 +68,23 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             // No FK to Scene/SceneRevision: the client streams and uploads concurrently, so a
             // session can exist before its scene revision does. The compile worker waits for it.
             entity.HasOne<Developer>().WithMany().HasForeignKey(s => s.DeveloperId);
+        });
+
+        modelBuilder.Entity<RefreshToken>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => t.TokenHash).IsUnique();
+            entity.HasIndex(t => t.FamilyId);
+            entity.HasOne<User>().WithMany().HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<AuditEvent>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.AtUtc);
+            entity.Property(e => e.Action).HasMaxLength(64);
+            entity.Property(e => e.Target).HasMaxLength(512);
+            entity.Property(e => e.Detail).HasMaxLength(2048);
         });
     }
 }

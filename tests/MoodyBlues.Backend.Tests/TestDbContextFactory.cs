@@ -14,3 +14,11 @@ public static class TestDbContextFactory
         return new MoodyBluesDbContext(options);
     }
 }
+
+/// <summary>The server config and ingest key protector the project endpoints need in tests.</summary>
+public static class TestProjects
+{
+    public static readonly Config.ServerConfig Config = new();
+
+    public static readonly IngestKeyProtector Protector = new(Config);
+}

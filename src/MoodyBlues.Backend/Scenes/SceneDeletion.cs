@@ -27,7 +27,9 @@ public static class SceneDeletion
         string developerId,
         string sceneId,
         IReadOnlyCollection<SceneRevision> revisions,
-        bool deleteScene)
+        bool deleteScene,
+        Guid? userId = null,
+        string? auditAction = null)
     {
         var hashes = revisions.Select(r => r.Hash).ToHashSet(StringComparer.Ordinal);
 
@@ -60,6 +62,13 @@ public static class SceneDeletion
         if (deleteScene && await db.Scenes.FindAsync(developerId, sceneId) is { } scene)
         {
             db.Scenes.Remove(scene);
+        }
+
+        if (auditAction is not null)
+        {
+            string versions = string.Join(", ", revisions.OrderBy(r => r.Version).Select(r => $"v{r.Version}"));
+            AuditLog.Add(db, userId, auditAction, $"{developerId}/{sceneId}",
+                $"{revisions.Count} version(s) [{versions}], {sessions.Count} session(s), {bytes} bytes");
         }
 
         await db.SaveChangesAsync();

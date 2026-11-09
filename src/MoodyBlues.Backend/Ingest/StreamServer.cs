@@ -13,7 +13,8 @@ using MoodyBlues.Backend.Storage;
 namespace MoodyBlues.Backend.Ingest;
 
 /// <summary>
-/// <c>GET /stream?token=...</c>: the Unity client's event WebSocket (Unity Spec 2, 8).
+/// <c>GET /stream</c> with header <c>X-MoodyBlues-Stream-Token</c>: the Unity client's event
+/// WebSocket (Unity Spec 2, 8).
 ///
 /// The receive loop does as little as possible: it checks each message decodes (so garbage and
 /// wrong protocol versions are refused at the door), appends the raw bytes to the session's
@@ -31,6 +32,9 @@ public sealed class StreamServer(
 {
     private static readonly TimeSpan ActivityWriteInterval = TimeSpan.FromSeconds(10);
 
+    /// <summary>Header carrying the session's stream token (from the handshake) on the WebSocket upgrade.</summary>
+    public const string TokenHeader = "X-MoodyBlues-Stream-Token";
+
     public static void Map(WebApplication app)
     {
         app.Map("/stream", async (HttpContext context, StreamServer server) => await server.HandleAsync(context))
@@ -45,7 +49,7 @@ public sealed class StreamServer(
             return;
         }
 
-        string? token = context.Request.Query["token"];
+        string? token = context.Request.Headers[TokenHeader];
         if (string.IsNullOrEmpty(token) || token.Length > 128)
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;

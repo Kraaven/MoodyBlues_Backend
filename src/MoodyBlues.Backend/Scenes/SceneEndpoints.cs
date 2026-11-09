@@ -60,7 +60,7 @@ public static class SceneEndpoints
         }
 
         List<SceneRevision> all = await db.SceneRevisions.Where(r => r.DeveloperId == developerId && r.SceneId == sceneId).ToListAsync();
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, all, deleteScene: true);
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, all, deleteScene: true, UserIdOf(principal), AuditLog.SceneDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
@@ -92,7 +92,7 @@ public static class SceneEndpoints
             return Results.Conflict("This is the scene's current version. Delete the scene instead.");
         }
 
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, [revision], deleteScene: false);
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, [revision], deleteScene: false, UserIdOf(principal), AuditLog.SceneVersionDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
@@ -115,7 +115,7 @@ public static class SceneEndpoints
             .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Hash != scene!.LatestHash)
             .ToListAsync();
 
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, archived, deleteScene: false);
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, archived, deleteScene: false, UserIdOf(principal), AuditLog.SceneArchiveDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
@@ -254,6 +254,8 @@ public static class SceneEndpoints
             awaiting,
             total);
     }
+
+    private static Guid? UserIdOf(ClaimsPrincipal principal) => CurrentUser.TryGetUserId(principal, out Guid id) ? id : null;
 
     internal static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(
         string developerId,

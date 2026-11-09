@@ -16,7 +16,7 @@ public class ProjectEndpointsTests
         using var db = TestDbContextFactory.Create();
         Guid userId = Guid.NewGuid();
 
-        var result = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("My Game"), TestPrincipal.For(userId), db);
+        var result = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("My Game"), TestPrincipal.For(userId), db, TestProjects.Protector);
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(result);
 
         Assert.NotNull(response);
@@ -35,7 +35,7 @@ public class ProjectEndpointsTests
     {
         using var db = TestDbContextFactory.Create();
 
-        var result = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("   "), TestPrincipal.For(Guid.NewGuid()), db);
+        var result = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("   "), TestPrincipal.For(Guid.NewGuid()), db, TestProjects.Protector);
         var (statusCode, _) = await HttpResultTestHelpers.ExecuteAsync(result);
 
         Assert.Equal(400, statusCode);
@@ -48,8 +48,8 @@ public class ProjectEndpointsTests
         Guid userA = Guid.NewGuid();
         Guid userB = Guid.NewGuid();
 
-        await ProjectEndpoints.CreateAsync(new CreateProjectRequest("A's Project"), TestPrincipal.For(userA), db);
-        await ProjectEndpoints.CreateAsync(new CreateProjectRequest("B's Project"), TestPrincipal.For(userB), db);
+        await ProjectEndpoints.CreateAsync(new CreateProjectRequest("A's Project"), TestPrincipal.For(userA), db, TestProjects.Protector);
+        await ProjectEndpoints.CreateAsync(new CreateProjectRequest("B's Project"), TestPrincipal.For(userB), db, TestProjects.Protector);
 
         var listResult = await ProjectEndpoints.ListAsync(TestPrincipal.For(userA), db);
         var projects = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<List<ProjectSummaryResponse>>(listResult);
@@ -65,7 +65,7 @@ public class ProjectEndpointsTests
         using var db = TestDbContextFactory.Create();
         Guid userId = Guid.NewGuid();
 
-        var createResult = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Scened Project"), TestPrincipal.For(userId), db);
+        var createResult = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Scened Project"), TestPrincipal.For(userId), db, TestProjects.Protector);
         var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(createResult);
 
         db.Scenes.Add(new Scene
@@ -88,7 +88,7 @@ public class ProjectEndpointsTests
         });
         await db.SaveChangesAsync();
 
-        var getResult = await ProjectEndpoints.GetAsync(created.Id, TestPrincipal.For(userId), db);
+        var getResult = await ProjectEndpoints.GetAsync(created.Id, TestPrincipal.For(userId), db, TestProjects.Config, TestProjects.Protector);
         var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectDetailResponse>(getResult);
 
         Assert.NotNull(detail);
@@ -106,10 +106,10 @@ public class ProjectEndpointsTests
         Guid owner = Guid.NewGuid();
         Guid intruder = Guid.NewGuid();
 
-        var createResult = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Private Project"), TestPrincipal.For(owner), db);
+        var createResult = await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Private Project"), TestPrincipal.For(owner), db, TestProjects.Protector);
         var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(createResult);
 
-        var getResult = await ProjectEndpoints.GetAsync(created!.Id, TestPrincipal.For(intruder), db);
+        var getResult = await ProjectEndpoints.GetAsync(created!.Id, TestPrincipal.For(intruder), db, TestProjects.Config, TestProjects.Protector);
         var (statusCode, _) = await HttpResultTestHelpers.ExecuteAsync(getResult);
 
         Assert.Equal(404, statusCode);

@@ -94,6 +94,23 @@ public sealed class ServerConfig
     /// <summary>Origins the dashboard SPA is served from (comma-separated in the environment variable).</summary>
     public string[] CorsOrigins { get; init; } = ["http://localhost:5173"];
 
+    /// <summary>Lifetime of the dashboard's access cookie (a JWT). Refreshed silently while the dashboard is open.</summary>
+    public TimeSpan AccessTokenLifetime { get; init; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>Lifetime of a refresh token. Each refresh replaces it, so this is how long a signed-in browser may stay idle.</summary>
+    public TimeSpan RefreshTokenLifetime { get; init; } = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// SameSite mode of the dashboard cookies: "Lax", "Strict" or "None". Lax works when the
+    /// dashboard and this API share a site (for example app.example.com and api.example.com).
+    /// "None" is needed when they do not (for example a *.vercel.app dashboard), and requires
+    /// HTTPS. Defaults to None over HTTPS and Lax over plain HTTP (local development).
+    /// </summary>
+    public string CookieSameSite { get; init; } = "Lax";
+
+    /// <summary>Marks the dashboard cookies Secure (HTTPS only). On whenever <see cref="PublicScheme"/> is https.</summary>
+    public bool CookieSecure => IsHttps;
+
     public static ServerConfig FromEnvironment()
     {
         string? Env(string name) => Environment.GetEnvironmentVariable(name);
@@ -123,6 +140,10 @@ public sealed class ServerConfig
             GltfTransformCommand = Env("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
             JwtSecret = Env("MOODYBLUES_JWT_SECRET") ?? InsecureDefaultJwtSecret,
             CorsOrigins = ParseCorsOrigins(Env("MOODYBLUES_CORS_ORIGIN")),
+            AccessTokenLifetime = TimeSpan.FromMinutes(Math.Clamp(TryParseInt(Env("MOODYBLUES_ACCESS_TOKEN_MINUTES"), 15), 1, 24 * 60)),
+            RefreshTokenLifetime = TimeSpan.FromDays(Math.Clamp(TryParseInt(Env("MOODYBLUES_REFRESH_TOKEN_DAYS"), 14), 1, 365)),
+            CookieSameSite = Env("MOODYBLUES_COOKIE_SAMESITE")
+                ?? (string.Equals(Env("MOODYBLUES_PUBLIC_SCHEME"), "https", StringComparison.OrdinalIgnoreCase) ? "None" : "Lax"),
         };
     }
 

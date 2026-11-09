@@ -8,7 +8,7 @@ The server side of MoodyBlues, an ASP.NET Core (.NET 10) app backed by Postgres.
   background;
 - keeps every uploaded version of every scene, so old recordings keep replaying against the
   scene they were recorded in;
-- serves the dashboard API (JWT-authenticated) used by `MoodyBlues_FrontEnd`.
+- serves the dashboard API (cookie-authenticated) used by `MoodyBlues_FrontEnd`.
 
 The wire protocol is specified in `MoodyBlues_Unity/Spec.md`. If this README and the code disagree,
 the code is right.
@@ -43,11 +43,12 @@ chmod +x deploy.sh
 ./deploy.sh reset     # stop, git pull, rebuild, start: the update command
 ./deploy.sh logs      # follow both containers' logs
 ./deploy.sh status    # container status
+./deploy.sh backup    # database dump + scene/session files into ./backups/<timestamp>/
 ```
 
 All state lives in Docker named volumes (`moodyblues-db-data`, `moodyblues-scenes`,
 `moodyblues-sessions`), so `reset` and `restart` never lose data. Database migrations run
-automatically at startup.
+automatically at startup. Volumes do not survive the disk they are on; see "Backup and restore".
 
 Create a `.env` file next to `docker-compose.yml`:
 
@@ -56,7 +57,13 @@ MOODYBLUES_DB_PASSWORD=<random password>
 MOODYBLUES_PUBLIC_HOST=your-domain.example.com
 MOODYBLUES_JWT_SECRET=<long random secret, e.g. `openssl rand -base64 48`>
 MOODYBLUES_CORS_ORIGIN=https://your-dashboard.example.com,http://localhost:5173
+# Optional: Lax when the dashboard is on the same site as the API (see "Dashboard sign-in")
+# MOODYBLUES_COOKIE_SAMESITE=Lax
 ```
+
+`MOODYBLUES_CORS_ORIGIN` must list exact origins (scheme, host and port, no path). `*` is refused
+at startup, because the dashboard sends cookies. A `MOODYBLUES_JWT_SECRET` shorter than 32 bytes
+is refused too.
 
 Postgres sets its password only when its volume is first created. If you change
 `MOODYBLUES_DB_PASSWORD` later, the backend can no longer log in. Either change the password
@@ -129,8 +136,11 @@ Everything is optional except where a deployment needs it (see `.env` above).
 | `MOODYBLUES_DB_CONNECTION` | local `moodyblues` database | Postgres connection string |
 | `MOODYBLUES_SCENES_DIR` | `data/scenes` | Scene files |
 | `MOODYBLUES_SESSIONS_DIR` | `data/sessions` | Session raw logs and replay files |
-| `MOODYBLUES_JWT_SECRET` | insecure dev value | Signs dashboard logins. **Set it in production**; the server warns at startup if it is the default |
-| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated dashboard origins |
+| `MOODYBLUES_JWT_SECRET` | insecure dev value | Signs dashboard access tokens. **Set it in production** (32+ bytes); the server warns at startup if it is the default and refuses a shorter one |
+| `MOODYBLUES_CORS_ORIGIN` | `http://localhost:5173` | Comma-separated exact dashboard origins; `*` is refused |
+| `MOODYBLUES_ACCESS_TOKEN_MINUTES` | `15` | Lifetime of the `mb_access` cookie |
+| `MOODYBLUES_REFRESH_TOKEN_DAYS` | `14` | Lifetime of the `mb_refresh` cookie; each refresh issues a new one |
+| `MOODYBLUES_COOKIE_SAMESITE` | `None` over https, `Lax` over http | SameSite of both cookies: `None`, `Lax` or `Strict`. `None` on plain http falls back to `Lax` (browsers reject it) |
 | `MOODYBLUES_TRUST_FORWARDED_HEADERS` | off | Trust `X-Forwarded-*` and `CF-Connecting-IP` (proxy deployments only) |
 | `MOODYBLUES_STREAM_INACTIVITY_TIMEOUT_SECONDS` | `30` | Close a `/stream` connection that delivers no valid message for this long |
 | `MOODYBLUES_STREAM_HEARTBEAT_SECONDS` | `10` | Interval of the server's KeepAlive on `/stream` |
@@ -154,8 +164,8 @@ Everything is optional except where a deployment needs it (see `.env` above).
 
 ## How a recording flows
 
-1. **Handshake.** The game calls `POST /handshake`, which creates a session in **Recording** and
-   returns a WebSocket URL with a secret token.
+1. **Handshake.** The game calls `POST /handshake` with the project's ingest key, which creates a
+   session in **Recording** and returns a WebSocket URL and a secret stream token.
 2. **Scene check and upload.**
    - `POST /scenes/check` (or the handshake) says whether this scene version (its hash) is stored.
    - If not, the Unity editor (at build time or from the Tools menu) or the game uploads it to
@@ -174,23 +184,48 @@ Everything is optional except where a deployment needs it (see `.env` above).
 
 Session statuses: `Recording`, `Queued`, `Compiling`, `Ready`, `Failed`, `WaitingForScene`.
 
-**Who can send data.** The Unity-facing endpoints accept only developer IDs that belong to a
-dashboard project; create a project to get one. The ID ships inside game builds, so treat it as
-public. The quotas above limit what a leaked ID can cost.
+**Who can send data.** Every Unity-facing HTTP call carries the project's **ingest key** in
+`X-MoodyBlues-Ingest-Key`, and the key alone says which project the data is for. Unity never
+sends the developer ID, which is now internal: it still keys scenes, sessions, storage paths and
+dashboard routes.
+
+- The user copies one **connection string** from the project page, `https://mbk_<key>@<public
+  host>`, built from `MOODYBLUES_PUBLIC_SCHEME`, `MOODYBLUES_PUBLIC_HOST` and
+  `MOODYBLUES_PUBLIC_PORT`. Unity splits it into the server address and the key.
+- The key (`mbk_` + 256 random bits) is created with the project. The database keeps its SHA-256
+  (unique index, used for the lookup) and an AES-256-GCM encrypted copy (`IngestKeyEncrypted`), so
+  the dashboard can show the connection string at any time. The encryption key is derived from
+  `MOODYBLUES_JWT_SECRET`. Changing that secret leaves every key working, but the dashboard can no
+  longer show them; it asks the owner to rotate.
+- `POST /api/projects/{id}/ingest-key` replaces the key; the old one stops working at once.
+  Rotation is in the audit log.
+- It allows uploads only; no dashboard route accepts it. It ships inside game builds, so treat
+  it as extractable. The quotas above limit what a leaked key can cost, and rotating it shuts the
+  leak.
+- Projects whose key was issued before the encrypted copy existed keep working, but show no
+  connection string until rotated. A project with no key refuses all uploads until one is
+  created on its page.
 
 ## Unity-facing API
+
+Errors common to all of these: **401** missing, wrong or rotated ingest key (the body says
+which).
+
+### `GET /connection`
+
+The editor's *Test Connection*. Returns `{ "projectName": "..." }` for a valid key, 401
+otherwise. Read-only, rate-limited like the other ingest routes.
 
 ### `POST /handshake`
 
 ```json
-{ "developerId": "...", "sceneId": "...", "sceneHash": "<64 hex>", "sessionId": "<client GUID>" }
+{ "sceneId": "...", "sceneHash": "<64 hex>", "sessionId": "<client GUID>" }
 ```
 
 ```json
-{ "webSocketUrl": "wss://host/stream?token=...", "sceneUploadRequired": true, "sceneUploadUrl": "https://host/scenes/{sceneId}?developerId=...&sceneHash=..." }
+{ "webSocketUrl": "wss://host/stream", "streamToken": "...", "sceneUploadRequired": true, "sceneUploadUrl": "https://host/scenes/{sceneId}?sceneHash=..." }
 ```
 
-- **Unknown developer ID:** 404.
 - **Too many recordings in progress for the project:** 429.
 - **Retries:** a retried handshake with the same `sessionId` reuses the session and issues a new
   token; the old token stops working.
@@ -198,7 +233,7 @@ public. The quotas above limit what a leaked ID can cost.
 ### `POST /scenes/check`
 
 ```json
-{ "developerId": "...", "sceneId": "...", "sceneHash": "<64 hex>" }
+{ "sceneId": "...", "sceneHash": "<64 hex>" }
 ```
 
 ```json
@@ -207,7 +242,7 @@ public. The quotas above limit what a leaked ID can cost.
 
 Same validation and rate limit as the handshake. It doesn't create a session.
 
-### `POST /scenes/{sceneId}?developerId=...&sceneHash=...`
+### `POST /scenes/{sceneId}?sceneHash=...`
 
 - **Body:** the `.glb`, usually with `Content-Encoding: gzip`. An optional
   `X-MoodyBlues-Skipped-Meshes: <n>` header reports meshes a runtime export couldn't read; the
@@ -218,7 +253,7 @@ Same validation and rate limit as the handshake. It doesn't create a session.
   waiting sessions are queued.
 - **Storage:** each upload writes its own file under `{ScenesDir}/{developerId}/{sceneId}/{hash}/`,
   so concurrent uploads of the same hash can't replace each other's file.
-- **Errors:** 404 unknown developer, 400 not a GLB, 413 too large, 507 version or storage quota
+- **Errors:** 401/404 as above, 400 not a GLB, 413 too large, 507 version or storage quota
   reached.
 
 The upload is processed in the background (`Scenes/Processing/`):
@@ -227,8 +262,11 @@ The upload is processed in the background (`Scenes/Processing/`):
 2. `gltf-transform optimize` produces a Draco/KTX2 `optimized.glb` for the viewer. If that fails,
    the raw upload is served instead.
 
-### `GET /stream?token=...` (WebSocket)
+### `GET /stream` (WebSocket)
 
+- **Auth:** the handshake's stream token, in the `X-MoodyBlues-Stream-Token` header of the
+  upgrade request. It is not accepted in the URL, so it stays out of proxy and access logs.
+  Only its hash is stored. Reconnects of the same recording send the same token.
 - **Messages:** binary only, each a run of whole events (protocol v3 only; see `Spec.md`). A
   message that doesn't decode is recorded as a data gap.
 - **Refused connections:** any protocol version other than 3, or a connection that doesn't start
@@ -237,16 +275,50 @@ The upload is processed in the background (`Scenes/Processing/`):
 
 ## Dashboard API
 
-Every `/api` route needs `Authorization: Bearer <JWT>` and checks that the caller owns the
+Every `/api` route needs a signed-in user (below) and checks that the caller owns the
 project. Another user's data returns 404, so its existence isn't revealed. Enums are sent as
 names, for example `"Ready"`.
 
+### Dashboard sign-in
+
+- **Cookies.** Sign-in and registration set two httpOnly cookies (Secure over https):
+  - `mb_access`, path `/`: a JWT, 15 minutes by default;
+  - `mb_refresh`, path `/auth`: an opaque token, 14 days by default, stored only as a hash.
+  Script never sees either. A `Bearer` header is still accepted, for tools.
+- **Refresh.** `POST /auth/refresh` exchanges `mb_refresh` for a new pair and revokes the old
+  refresh token. Presenting a revoked one again (a stolen copy, say) revokes the whole chain and
+  signs that browser out; a second tab refreshing within 30 s of the first is not treated as
+  reuse.
+- **CSRF.** Every `POST`, `PATCH`, `PUT` and `DELETE` under `/api` and `/auth` must carry the
+  header `X-MoodyBlues-Client` (any value; the dashboard sends `dashboard`), or it gets 403. A
+  cross-site form cannot add a header, and a cross-site script cannot send one without passing
+  CORS.
+- **SameSite and hosting.** If the dashboard and the API are on the same site (for example
+  `app.example.com` and `api.example.com`), set `MOODYBLUES_COOKIE_SAMESITE=Lax`. If they are on
+  different sites (for example `*.vercel.app` and your own domain), the cookies are third-party
+  cookies and need `None` (the https default). Safari, and Firefox in strict mode, block
+  third-party cookies, so there sign-in will not stick. Host the dashboard on a subdomain of the
+  API's site to avoid that.
+- **Passwords.** PBKDF2-SHA256 with 600,000 iterations. Older hashes are upgraded the next time
+  their owner signs in.
+- **No account probing.** A failed sign-in always says "Wrong email or password." and takes as
+  long as a real check. Registering a taken email returns the same generic 400 as any other
+  refused registration. A successful registration still shows the address was free; closing
+  that needs email verification, which there is none of yet.
+- **Headers.** Every API response carries `Content-Security-Policy: default-src 'none';
+  frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy:
+  same-origin`, and HSTS over https. The dashboard's own CSP is in its `vercel.json`.
+
 | Route | Purpose |
 |---|---|
-| `POST /auth/register`, `POST /auth/login` | Create an account / sign in; returns a JWT (7 days) |
+| `POST /auth/register`, `POST /auth/login` | Create an account / sign in; sets the cookies and returns `{ userId, email }` |
+| `POST /auth/refresh` | New cookie pair from `mb_refresh`; 401 if it is missing, expired or revoked |
+| `POST /auth/logout` | Revokes the refresh token and clears both cookies (204) |
 | `GET /auth/me` | The signed-in user |
-| `GET /api/projects`, `POST /api/projects` | List / create projects; creating one issues its Developer ID |
-| `GET /api/projects/{id}` | A project and its scenes (each with its current version number) |
+| `GET /api/projects`, `POST /api/projects` | List / create projects. Creating one issues its (internal) developer ID and its first ingest key. Both carry `ingestKeyPrefix` and `ingestKeyCreatedAtUtc` |
+| `POST /api/projects/{id}/ingest-key` | Replace the ingest key: `{ connectionString, ingestKeyPrefix, ingestKeyCreatedAtUtc }`. The old key stops working |
+| `GET /api/projects/{id}` | A project and its scenes (each with its current version number), and `connectionString` for Unity (null if the project has no key, or its key predates stored keys) |
 | `GET /api/scenes/{dev}/{scene}` | The scene: current version, archived versions (newest first, with session counts and sizes), and the number of sessions waiting for an un-uploaded version |
 | `PATCH /api/scenes/{dev}/{scene}` | Rename (`{ "displayName": "..." }`) |
 | `DELETE /api/scenes/{dev}/{scene}` | Delete the scene: closes its live recordings, then removes every version, session and file |
@@ -260,6 +332,58 @@ names, for example `"Ready"`.
 | `DELETE /api/sessions/{id}` | Delete one session (not while recording or compiling) |
 
 Delete endpoints return `{ "deletedVersions", "deletedSessions", "freedBytes" }`.
+
+**Audit log.** Every deletion (scene, version, archive, session) and every ingest key rotation
+writes a row to the `AuditEvents` table: time (`AtUtc`), user, action (`scene.delete`,
+`scene.version.delete`, `scene.archive.delete`, `session.delete`, `project.ingestKey.rotate`),
+the target and what was removed (`Detail`). It is saved in the same transaction as the change. There
+is no API or UI for it; query it with `psql`:
+
+```bash
+docker compose exec db psql -U moodyblues -d moodyblues \
+  -c 'SELECT * FROM "AuditEvents" ORDER BY "AtUtc" DESC LIMIT 50;'
+```
+
+## Backup and restore
+
+`./deploy.sh backup` writes `backups/<UTC timestamp>/` next to the repo:
+
+- `db.dump`: `pg_dump --format=custom` of the database (accounts, projects, sessions, audit log);
+- `files.tar.gz`: the `scenes` and `sessions` volumes (uploaded GLBs, raw logs, replays).
+
+The stack keeps running. The database is dumped first, so a recording that writes files during
+the backup leaves at worst files the database does not know about. Both files hold user data and
+password hashes: the folder is created mode 700, and `backups/` is git-ignored. Copy it off the
+machine (a backup on the same disk does not survive the disk), for example from a nightly cron
+job:
+
+```
+0 3 * * * cd /path/to/MoodyBlues_Backend && ./deploy.sh backup && rsync -a backups/ backup-host:moodyblues/
+```
+
+Old backups are not deleted automatically.
+
+**Restore** (replaces everything currently stored):
+
+```bash
+cd /path/to/MoodyBlues_Backend
+B=backups/<timestamp>
+
+docker compose stop backend                       # nothing may write while restoring
+docker compose exec -T db pg_restore -U moodyblues -d moodyblues --clean --if-exists --no-owner < $B/db.dump
+
+BACKEND=$(docker compose ps -aq backend)
+docker run --rm --volumes-from "$BACKEND" -v "$PWD/$B":/backup alpine \
+  sh -c 'rm -rf /app/data/scenes/* /app/data/sessions/* && tar xzf /backup/files.tar.gz -C /app/data'
+
+docker compose start backend                      # migrations bring an older dump up to date
+```
+
+The restored files belong to root; the entrypoint hands them back to the `app` user when the
+backend starts. On a new machine, run `./deploy.sh` once first (with the same `.env`) so the
+volumes and containers exist, then restore. Keep `.env` with the backups: without
+`MOODYBLUES_DB_PASSWORD` the database cannot be opened, and a different `MOODYBLUES_JWT_SECRET`
+only signs everyone out.
 
 ## Storage formats
 
@@ -278,11 +402,12 @@ src/MoodyBlues.Backend/
   Program.cs                 host setup, DI, middleware, endpoint mapping
   Config/ServerConfig.cs     every setting and quota, from MOODYBLUES_* environment variables
   Common/                    PathSegments (ID validation), RateLimits, IdGenerator, WorkSignal
-  Data/                      EF Core entities and context, IngestAccess, StorageQuota, DeveloperProvisioning
+  Data/                      EF Core entities and context, IngestAccess (key lookup, connection string), IngestKeyProtector, StorageQuota, DeveloperProvisioning
   Migrations/                EF Core migrations (applied at startup)
-  Auth/                      registration, login, JWT, password hashing
+  Auth/                      registration, login, refresh tokens, cookies and CSRF check, JWT, password hashing
+  Common/SecurityHeaders.cs  response security headers
   Projects/                  /api/projects
-  Ingest/                    /handshake, /scenes/check, /stream, open-connection tracking, stream tokens
+  Ingest/                    /connection, /handshake, /scenes/check, /stream, open-connection tracking, stream tokens
   Scenes/                    scene upload, dashboard scene routes, versions and deletion, object registry
   Scenes/Processing/         background registry build and gltf-transform optimization
   Sessions/                  dashboard session routes

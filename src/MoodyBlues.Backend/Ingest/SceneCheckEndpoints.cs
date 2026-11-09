@@ -19,21 +19,32 @@ public static class SceneCheckEndpoints
     {
         // A literal segment, so routing prefers it over POST /scenes/{sceneId} (the upload).
         app.MapPost("/scenes/check", HandleAsync).RequireRateLimiting(RateLimits.Ingest);
+
+        // The Unity editor's "Test connection": which project does this key belong to?
+        app.MapGet("/connection", ConnectionAsync).RequireRateLimiting(RateLimits.Ingest);
+    }
+
+    /// <summary>
+    /// <c>GET /connection</c>: 200 with the project's name if the ingest key is valid, 401
+    /// otherwise. Read-only and reveals nothing beyond the name of the key's own project.
+    /// </summary>
+    public static async Task<IResult> ConnectionAsync(HttpRequest httpRequest, MoodyBluesDbContext db)
+    {
+        (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, httpRequest);
+        return denied ?? Results.Ok(new ConnectionResponse(project!.Name));
     }
 
     /// <summary>Public so tests can call it directly against an in-memory database.</summary>
-    public static async Task<IResult> HandleAsync(SceneCheckRequest request, MoodyBluesDbContext db, ServerConfig config)
+    public static async Task<IResult> HandleAsync(SceneCheckRequest request, HttpRequest httpRequest, MoodyBluesDbContext db, ServerConfig config)
     {
-        if (string.IsNullOrWhiteSpace(request.DeveloperId) ||
-            string.IsNullOrWhiteSpace(request.SceneId) ||
-            string.IsNullOrWhiteSpace(request.SceneHash))
+        if (string.IsNullOrWhiteSpace(request.SceneId) || string.IsNullOrWhiteSpace(request.SceneHash))
         {
-            return Results.BadRequest("developerId, sceneId and sceneHash are all required.");
+            return Results.BadRequest("sceneId and sceneHash are both required.");
         }
 
-        if (!PathSegments.IsSafe(request.DeveloperId) || !PathSegments.IsSafe(request.SceneId))
+        if (!PathSegments.IsSafe(request.SceneId))
         {
-            return Results.BadRequest("developerId and sceneId may only contain letters, digits, '-' and '_'.");
+            return Results.BadRequest("sceneId may only contain letters, digits, '-' and '_'.");
         }
 
         if (!PathSegments.IsSceneHash(request.SceneHash))
@@ -41,26 +52,27 @@ public static class SceneCheckEndpoints
             return Results.BadRequest("sceneHash must be 64 lowercase hex characters.");
         }
 
-        if (!await IngestAccess.IsRegisteredDeveloperAsync(db, request.DeveloperId))
+        (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, httpRequest);
+        if (denied is not null)
         {
-            return Results.NotFound(IngestAccess.UnknownDeveloperMessage);
+            return denied;
         }
 
+        string developerId = project!.DeveloperId;
         bool sceneUploadRequired = !await db.SceneRevisions.AnyAsync(r =>
-            r.DeveloperId == request.DeveloperId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);
+            r.DeveloperId == developerId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);
 
         string? sceneUploadUrl = sceneUploadRequired
-            ? BuildSceneUploadUrl(config, request.DeveloperId, request.SceneId, request.SceneHash)
+            ? BuildSceneUploadUrl(config, request.SceneId, request.SceneHash)
             : null;
 
         ConsoleLog.Info(
-            $"Scene check: developer={request.DeveloperId} scene={request.SceneId} sceneUploadRequired={sceneUploadRequired}");
+            $"Scene check: developer={developerId} scene={request.SceneId} sceneUploadRequired={sceneUploadRequired}");
 
         return Results.Ok(new SceneCheckResponse(sceneUploadRequired, sceneUploadUrl));
     }
 
-    /// <summary>The upload URL handed to the client, shared with the handshake.</summary>
-    public static string BuildSceneUploadUrl(ServerConfig config, string developerId, string sceneId, string sceneHash) =>
-        $"{(config.IsHttps ? "https" : "http")}://{config.PublicHostAndPort()}/scenes/{sceneId}" +
-        $"?developerId={developerId}&sceneHash={sceneHash}";
+    /// <summary>The upload URL handed to the client, shared with the handshake. The project comes from the key.</summary>
+    public static string BuildSceneUploadUrl(ServerConfig config, string sceneId, string sceneHash) =>
+        $"{(config.IsHttps ? "https" : "http")}://{config.PublicHostAndPort()}/scenes/{sceneId}?sceneHash={sceneHash}";
 }

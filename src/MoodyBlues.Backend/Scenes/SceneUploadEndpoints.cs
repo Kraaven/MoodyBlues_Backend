@@ -11,7 +11,7 @@ using MoodyBlues.Backend.Storage;
 namespace MoodyBlues.Backend.Scenes;
 
 /// <summary>
-/// <c>POST /scenes/{sceneId}?developerId=&amp;sceneHash=</c>: a Unity client or the Unity editor
+/// <c>POST /scenes/{sceneId}?sceneHash=</c> (the project comes from the ingest key): a Unity client or the Unity editor
 /// uploading the GLB of a scene version the server does not have (Unity Spec 13.3). The body is
 /// the .glb, usually gzip-encoded. An optional <c>X-MoodyBlues-Skipped-Meshes</c> header reports
 /// how many meshes a runtime export could not read.
@@ -41,20 +41,22 @@ public static class SceneUploadEndpoints
         StoragePaths paths,
         SceneWorkSignal signal)
     {
-        string? developerId = request.Query["developerId"];
         string? sceneHash = request.Query["sceneHash"];
 
-        if (!PathSegments.IsSafe(developerId) || !PathSegments.IsSafe(sceneId) || !PathSegments.IsSceneHash(sceneHash))
+        if (!PathSegments.IsSafe(sceneId) || !PathSegments.IsSceneHash(sceneHash))
         {
-            return Results.BadRequest("developerId, sceneId and a 64-character lowercase hex sceneHash are required.");
+            return Results.BadRequest("sceneId and a 64-character lowercase hex sceneHash are required.");
         }
 
-        if (!await IngestAccess.IsRegisteredDeveloperAsync(db, developerId!))
+        (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, request);
+        if (denied is not null)
         {
-            return Results.NotFound(IngestAccess.UnknownDeveloperMessage);
+            return denied;
         }
 
-        if (await RevisionExistsAsync(db, developerId!, sceneId, sceneHash!))
+        string developerId = project!.DeveloperId;
+
+        if (await RevisionExistsAsync(db, developerId, sceneId, sceneHash!))
         {
             return Results.Ok(); // already have this version; versions never change
         }
@@ -68,7 +70,7 @@ public static class SceneUploadEndpoints
         }
 
         if (config.MaxStoragePerDeveloperBytes > 0 &&
-            await StorageQuota.UsedBytesAsync(db, developerId!) >= config.MaxStoragePerDeveloperBytes)
+            await StorageQuota.UsedBytesAsync(db, developerId) >= config.MaxStoragePerDeveloperBytes)
         {
             return Results.Problem(
                 "This project has reached its storage limit. Delete archived versions or old sessions in the dashboard.",
@@ -85,7 +87,7 @@ public static class SceneUploadEndpoints
         }
 
         // A file per upload, so a concurrent upload of the same hash cannot replace this one.
-        string dir = StoragePaths.SceneRevisionDir(developerId!, sceneId, sceneHash!);
+        string dir = StoragePaths.SceneRevisionDir(developerId, sceneId, sceneHash!);
         string rawRelative = Path.Combine(dir, $"raw-{Guid.NewGuid():N}.glb");
         string rawFull = paths.SceneFull(rawRelative);
 
@@ -153,7 +155,7 @@ public static class SceneUploadEndpoints
             {
                 db.Scenes.Add(new Scene
                 {
-                    DeveloperId = developerId!,
+                    DeveloperId = developerId,
                     SceneId = sceneId,
                     LatestHash = sceneHash!,
                     CreatedAtUtc = now,
@@ -168,7 +170,7 @@ public static class SceneUploadEndpoints
 
             db.SceneRevisions.Add(new SceneRevision
             {
-                DeveloperId = developerId!,
+                DeveloperId = developerId,
                 SceneId = sceneId,
                 Hash = sceneHash!,
                 Version = version,
@@ -202,7 +204,7 @@ public static class SceneUploadEndpoints
             catch (DbUpdateException)
             {
                 db.ChangeTracker.Clear();
-                if (await RevisionExistsAsync(db, developerId!, sceneId, sceneHash!))
+                if (await RevisionExistsAsync(db, developerId, sceneId, sceneHash!))
                 {
                     // A concurrent upload of the same hash won; it keeps its own file.
                     TryDelete(rawFull);

@@ -39,16 +39,16 @@ public class IngestEndpointsTests : IDisposable
         using var db = TestDbContextFactory.Create();
         await SeedProjectAsync(db, "dev1");
 
-        var result = await HandshakeEndpoints.HandleAsync(new HandshakeRequest("dev1", "scene1", Hash, "run-1"), db, _config);
+        var result = await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-1"), KeyedRequest("dev1"), db, _config);
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(result);
 
         Assert.True(response!.SceneUploadRequired);
-        Assert.Equal($"http://localhost:8765/scenes/scene1?developerId=dev1&sceneHash={Hash}", response.SceneUploadUrl);
-        Assert.StartsWith("ws://localhost:8765/stream?token=", response.WebSocketUrl);
+        Assert.Equal($"http://localhost:8765/scenes/scene1?sceneHash={Hash}", response.SceneUploadUrl);
+        Assert.Equal("ws://localhost:8765/stream", response.WebSocketUrl);
 
         Session session = await db.Sessions.SingleAsync();
         Assert.Equal(SessionStatus.Recording, session.Status);
-        string token = response.WebSocketUrl.Split("token=")[1];
+        string token = response.StreamToken;
         Assert.Equal(StreamTokens.Hash(token), session.StreamTokenHash);
         Assert.True(await db.Developers.AnyAsync(d => d.Id == "dev1"));
     }
@@ -58,14 +58,14 @@ public class IngestEndpointsTests : IDisposable
     {
         using var db = TestDbContextFactory.Create();
         await SeedProjectAsync(db, "dev1");
-        var request = new HandshakeRequest("dev1", "scene1", Hash, "run-1");
+        var request = new HandshakeRequest("scene1", Hash, "run-1");
 
-        var first = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, db, _config));
-        var second = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, db, _config));
+        var first = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
+        var second = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
 
         Assert.Equal(1, await db.Sessions.CountAsync());
-        Assert.NotEqual(first!.WebSocketUrl, second!.WebSocketUrl);
-        Assert.Equal(StreamTokens.Hash(second.WebSocketUrl.Split("token=")[1]), (await db.Sessions.SingleAsync()).StreamTokenHash);
+        Assert.NotEqual(first!.StreamToken, second!.StreamToken);
+        Assert.Equal(StreamTokens.Hash(second.StreamToken), (await db.Sessions.SingleAsync()).StreamTokenHash);
     }
 
     [Fact]
@@ -73,12 +73,12 @@ public class IngestEndpointsTests : IDisposable
     {
         using var db = TestDbContextFactory.Create();
         await SeedProjectAsync(db, "dev1");
-        var request = new HandshakeRequest("dev1", "scene1", Hash, "run-1");
-        await HandshakeEndpoints.HandleAsync(request, db, _config);
+        var request = new HandshakeRequest("scene1", Hash, "run-1");
+        await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config);
         (await db.Sessions.SingleAsync()).Status = SessionStatus.Ready;
         await db.SaveChangesAsync();
 
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await HandshakeEndpoints.HandleAsync(request, db, _config));
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
 
         Assert.Equal(409, status);
     }
@@ -90,22 +90,22 @@ public class IngestEndpointsTests : IDisposable
         await SeedRevisionAsync(db, "dev1", "scene1", Hash);
 
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("dev1", "scene1", Hash, "run-2"), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-2"), KeyedRequest("dev1"), db, _config));
 
         Assert.False(response!.SceneUploadRequired);
         Assert.Null(response.SceneUploadUrl);
     }
 
     [Theory]
-    [InlineData("", "scene1", "run")]
-    [InlineData("../dev", "scene1", "run")]
-    [InlineData("dev1", "C:evil", "run")]
-    [InlineData("dev1", "scene1", "run/1")]
-    public async Task Handshake_InvalidIdentifiers_AreRejected(string developerId, string sceneId, string sessionId)
+    [InlineData("", "run")]
+    [InlineData("../scene", "run")]
+    [InlineData("C:evil", "run")]
+    [InlineData("scene1", "run/1")]
+    public async Task Handshake_InvalidIdentifiers_AreRejected(string sceneId, string sessionId)
     {
         using var db = TestDbContextFactory.Create();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest(developerId, sceneId, Hash, sessionId), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest(sceneId, Hash, sessionId), KeyedRequest("dev1"), db, _config));
         Assert.Equal(400, status);
     }
 
@@ -114,7 +114,7 @@ public class IngestEndpointsTests : IDisposable
     {
         using var db = TestDbContextFactory.Create();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("dev1", "scene1", "not-a-hash", "run"), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", "not-a-hash", "run"), KeyedRequest("dev1"), db, _config));
         Assert.Equal(400, status);
     }
 
@@ -179,11 +179,22 @@ public class IngestEndpointsTests : IDisposable
     }
 
     [Fact]
-    public async Task Upload_UnknownDeveloper_IsRejected()
+    public async Task Upload_UnknownKey_IsRejected()
     {
         using var db = TestDbContextFactory.Create();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "nobody", "scene1", Hash, FakeGlb(10), gzip: false));
-        Assert.Equal(404, status);
+        Assert.Equal(401, status);
+    }
+
+    /// <summary>The ingest key of the project seeded for <paramref name="developerId"/>. The key identifies the project.</summary>
+    internal static string KeyFor(string developerId) => IngestAccess.KeyPrefix + "test-" + developerId;
+
+    /// <summary>A request carrying the ingest key of <paramref name="developerId"/>'s seeded project.</summary>
+    internal static HttpRequest KeyedRequest(string developerId)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(developerId);
+        return context.Request;
     }
 
     internal static byte[] FakeGlb(int size)
@@ -214,7 +225,8 @@ public class IngestEndpointsTests : IDisposable
         }
 
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString($"?developerId={developerId}&sceneHash={hash}");
+        context.Request.QueryString = new QueryString($"?sceneHash={hash}");
+        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(developerId);
         context.Request.Body = gzip ? new GZipStream(new MemoryStream(payload), CompressionMode.Decompress) : new MemoryStream(payload);
         return context.Request;
     }
@@ -225,7 +237,7 @@ public class IngestEndpointsTests : IDisposable
         await DeveloperProvisioning.EnsureExistsAsync(db, developerId);
         if (!await db.Projects.AnyAsync(p => p.DeveloperId == developerId))
         {
-            db.Projects.Add(new Project { Id = Guid.NewGuid(), UserId = Guid.NewGuid(), Name = developerId, DeveloperId = developerId, CreatedAtUtc = DateTime.UtcNow });
+            db.Projects.Add(new Project { Id = Guid.NewGuid(), UserId = Guid.NewGuid(), Name = developerId, DeveloperId = developerId, CreatedAtUtc = DateTime.UtcNow, IngestKeyHash = IngestAccess.Hash(KeyFor(developerId)) });
             await db.SaveChangesAsync();
         }
     }

@@ -6,7 +6,7 @@
 # builds the Docker images, and starts Postgres + the backend. Re-run it with
 # the commands below to manage the running stack.
 #
-# Usage: ./deploy.sh [start|stop|restart|reset|logs|status]
+# Usage: ./deploy.sh [start|stop|restart|reset|logs|status|backup]
 #
 #   start    (default) Build (if needed) and start the stack.
 #   stop     Stop the stack; containers/volumes are kept, so 'start' is fast.
@@ -16,6 +16,8 @@
 #            restart" command.
 #   logs     Tail logs from both containers.
 #   status   Show container status.
+#   backup   Dump the database and archive the scene/session files into
+#            ./backups/<timestamp>/ (see README "Backup and restore").
 #
 # All state (Postgres data, uploaded scenes, logs) lives in Docker named
 # volumes, so 'reset' and 'restart' don't lose any data.
@@ -75,6 +77,36 @@ cmd_status() {
     compose ps
 }
 
+# Writes backups/<UTC timestamp>/ next to the repo: db.dump (pg_dump custom format) and
+# files.tar.gz (the scenes and sessions volumes). The stack keeps running. The database is dumped
+# first, so files written in between are at worst extra files the database does not know about;
+# restoring never leaves the database pointing at missing files from before the dump. README
+# "Backup and restore" has the restore steps.
+cmd_backup() {
+    local stamp dir backend
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dir="$REPO_ROOT/backups/$stamp"
+    mkdir -p "$dir"
+    chmod 700 "$REPO_ROOT/backups" "$dir"
+
+    backend="$(compose ps -aq backend)"
+    if [ -z "$backend" ]; then
+        echo "The backend container does not exist; run '$0 start' first." >&2
+        exit 1
+    fi
+
+    echo "Dumping the database..."
+    compose exec -T db pg_dump -U moodyblues -d moodyblues --format=custom > "$dir/db.dump"
+
+    echo "Archiving scene and session files..."
+    docker run --rm --volumes-from "$backend" -v "$dir":/backup alpine \
+        tar czf /backup/files.tar.gz -C /app/data scenes sessions
+
+    chmod 600 "$dir"/*
+    echo "Backup written to $dir:"
+    ls -lh "$dir"
+}
+
 resolve_repo_root
 
 case "${1:-start}" in
@@ -84,8 +116,9 @@ case "${1:-start}" in
     reset)   cmd_reset ;;
     logs)    cmd_logs ;;
     status)  cmd_status ;;
+    backup)  cmd_backup ;;
     *)
-        echo "Usage: $0 {start|stop|restart|reset|logs|status}" >&2
+        echo "Usage: $0 {start|stop|restart|reset|logs|status|backup}" >&2
         exit 1
         ;;
 esac

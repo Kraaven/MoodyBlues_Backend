@@ -181,14 +181,17 @@ public static class SessionEndpoints
             return Results.Conflict("The session is still recording or compiling.");
         }
 
-        string dir = paths.SessionFull(StoragePaths.SessionDir(session.DeveloperId, session.Id));
-        if (Directory.Exists(dir))
-        {
-            Directory.Delete(dir, recursive: true);
-        }
-
         db.Sessions.Remove(session);
+        AuditLog.Add(
+            db,
+            CurrentUser.TryGetUserId(principal, out Guid userId) ? userId : null,
+            AuditLog.SessionDelete,
+            session.Id.ToString(),
+            $"{session.DeveloperId}/{session.SceneId}, recorded {session.CreatedAtUtc:u}, {session.RawLogSizeBytes + session.ReplaySizeBytes} bytes");
         await db.SaveChangesAsync();
+
+        // Files after the row, as in SceneDeletion: a failure leaves an orphaned folder, never a row without files.
+        Scenes.SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(session.DeveloperId, session.Id)));
         return Results.NoContent();
     }
 
