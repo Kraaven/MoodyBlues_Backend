@@ -107,4 +107,13 @@ public sealed class Session
     public DateTime? CompiledAtUtc { get; set; }
 
     public string? ErrorMessage { get; set; }
+
+    /// <summary>True while anyone holding <see cref="ShareToken"/> may view this session without signing in.</summary>
+    public bool IsPublic { get; set; }
+
+    /// <summary>
+    /// Secret in the public share link (32 random bytes, base64url). Created when the session is first
+    /// made public, kept when it is made private again (the link just stops working), replaced on reset.
+    /// </summary>
+    public string? ShareToken { get; set; }
 }

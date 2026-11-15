@@ -167,6 +167,18 @@ public static class SceneEndpoints
             return Results.BadRequest("hash must be 64 lowercase hex characters.");
         }
 
+        return await ServeRevisionAsync(projectId, sceneId, revisionHash, db, paths, httpContext);
+    }
+
+    /// <summary>Streams one revision's GLB (no ownership check: callers authorize first); shared with the public share route.</summary>
+    internal static async Task<IResult> ServeRevisionAsync(
+        Guid projectId,
+        string sceneId,
+        string revisionHash,
+        MoodyBluesDbContext db,
+        StoragePaths paths,
+        HttpContext httpContext)
+    {
         SceneRevision? revision = await db.SceneRevisions.FindAsync(projectId, sceneId, revisionHash);
         if (revision is null)
         {

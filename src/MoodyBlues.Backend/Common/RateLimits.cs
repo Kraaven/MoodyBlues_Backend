@@ -21,6 +21,9 @@ public static class RateLimits
     /// <summary>Unity-facing endpoints: handshake, stream connect, scene upload.</summary>
     public const string Ingest = "ingest";
 
+    /// <summary>Anonymous public share links: view, replay and scene downloads.</summary>
+    public const string Share = "share";
+
     private const string CloudflareClientIpHeader = "CF-Connecting-IP";
 
     public static IServiceCollection AddMoodyBluesRateLimits(this IServiceCollection services, bool trustForwardedHeaders)
@@ -36,6 +39,10 @@ public static class RateLimits
             options.AddPolicy(Ingest, context => RateLimitPartition.GetFixedWindowLimiter(
                 ClientKey(context, trustForwardedHeaders),
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+
+            options.AddPolicy(Share, context => RateLimitPartition.GetFixedWindowLimiter(
+                ClientKey(context, trustForwardedHeaders),
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 240, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
     }
 

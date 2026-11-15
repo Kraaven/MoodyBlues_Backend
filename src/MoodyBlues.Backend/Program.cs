@@ -133,6 +133,7 @@ AuthEndpoints.Map(app);
 ProjectEndpoints.Map(app);
 SceneEndpoints.Map(app);
 SessionEndpoints.Map(app);
+ShareEndpoints.Map(app);
 
 ConsoleLog.Info(
     $"MoodyBlues backend listening on http://{config.Host}:{config.Port}/ " +

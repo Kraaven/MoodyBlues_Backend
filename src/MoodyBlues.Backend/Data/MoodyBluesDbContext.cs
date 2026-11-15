@@ -59,6 +59,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             entity.HasIndex(s => new { s.ProjectId, s.ClientSessionId }).IsUnique();
             entity.HasIndex(s => s.StreamTokenHash).IsUnique();
             entity.HasIndex(s => s.Status);
+            entity.HasIndex(s => s.ShareToken).IsUnique().HasFilter("\"ShareToken\" IS NOT NULL");
 
             // No FK to Scene/SceneRevision: the client streams and uploads concurrently, so a
             // session can exist before its scene revision does. The compile worker waits for it.

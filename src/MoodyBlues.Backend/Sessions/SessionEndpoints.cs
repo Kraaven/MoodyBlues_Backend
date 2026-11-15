@@ -26,6 +26,8 @@ public static class SessionEndpoints
         var group = app.MapGroup("/api/sessions/{sessionId}").RequireAuthorization();
         group.MapGet("/", GetAsync);
         group.MapGet("/replay", DownloadReplayAsync);
+        group.MapPut("/sharing", SetSharingAsync);
+        group.MapPost("/sharing/reset", ResetSharingAsync);
         group.MapPost("/recompile", RecompileAsync);
         group.MapDelete("/", DeleteAsync);
     }
@@ -90,7 +92,7 @@ public static class SessionEndpoints
                 x.Session.EndedCleanly, x.Session.DurationSeconds, x.Session.ObjectCount, x.Session.SpawnCount,
                 x.Session.KeyframeCount, x.Session.ReplaySizeBytes, x.Session.RawLogSizeBytes, x.SceneVersion,
                 x.Session.ErrorMessage, x.Session.InfoLogCount, x.Session.WarningLogCount, x.Session.ErrorLogCount,
-                SessionActivity.FromJson(x.Session.ActivityJson)))
+                SessionActivity.FromJson(x.Session.ActivityJson), x.Session.IsPublic, x.Session.ShareToken))
             .ToList();
 
         return Results.Ok(sessions);
@@ -104,13 +106,56 @@ public static class SessionEndpoints
             return error;
         }
 
-        return Results.Ok(new SessionDetailResponse(
-            s!.Id, s.ProjectId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
-            s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.KeyframeCount,
-            s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents, s.RotationWidenings,
-            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount,
-            SessionActivity.FromJson(s.ActivityJson)));
+        return Results.Ok(ToDetail(s!));
     }
+
+    internal static SessionDetailResponse ToDetail(Session s) => new(
+        s.Id, s.ProjectId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
+        s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.KeyframeCount,
+        s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents, s.RotationWidenings,
+        s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount,
+        SessionActivity.FromJson(s.ActivityJson), s.IsPublic, s.ShareToken);
+
+    /// <summary>Turns public sharing on or off. The token is created on first use and kept while private.</summary>
+    public static async Task<IResult> SetSharingAsync(
+        string sessionId,
+        SharingRequest request,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db)
+    {
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        session!.IsPublic = request.IsPublic;
+        if (request.IsPublic && session.ShareToken is null)
+        {
+            session.ShareToken = ShareTokens.Create();
+        }
+
+        AuditLog.Add(db, UserIdOf(principal), AuditLog.SessionShare, session.Id.ToString(), request.IsPublic ? "public" : "private");
+        await db.SaveChangesAsync();
+        return Results.Ok(new SharingResponse(session.IsPublic, session.ShareToken));
+    }
+
+    /// <summary>Issues a new share token (even while private), which invalidates the old link.</summary>
+    public static async Task<IResult> ResetSharingAsync(string sessionId, ClaimsPrincipal principal, MoodyBluesDbContext db)
+    {
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        session!.ShareToken = ShareTokens.Create();
+        AuditLog.Add(db, UserIdOf(principal), AuditLog.SessionShareReset, session.Id.ToString(), session.IsPublic ? "public" : "private");
+        await db.SaveChangesAsync();
+        return Results.Ok(new SharingResponse(session.IsPublic, session.ShareToken));
+    }
+
+    private static Guid? UserIdOf(ClaimsPrincipal principal) => CurrentUser.TryGetUserId(principal, out Guid id) ? id : null;
 
     /// <summary>
     /// The compiled replay file. Stored gzipped and sent with <c>Content-Encoding: gzip</c>, so the
@@ -129,7 +174,13 @@ public static class SessionEndpoints
             return error;
         }
 
-        if (session!.Status != SessionStatus.Ready || session.ReplayPath is null)
+        return ServeReplay(session!, paths, httpContext);
+    }
+
+    /// <summary>Streams a Ready session's replay file; shared by the owner and the public share routes.</summary>
+    internal static IResult ServeReplay(Session session, StoragePaths paths, HttpContext httpContext)
+    {
+        if (session.Status != SessionStatus.Ready || session.ReplayPath is null)
         {
             return Results.NotFound("The replay is not ready yet.");
         }

@@ -270,6 +270,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<int>("InfoLogCount")
                         .HasColumnType("integer");
 
+                    b.Property<bool>("IsPublic")
+                        .HasColumnType("boolean");
+
                     b.Property<long>("KeyframeCount")
                         .HasColumnType("bigint");
 
@@ -306,6 +309,9 @@ namespace MoodyBlues.Backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("ShareToken")
+                        .HasColumnType("text");
+
                     b.Property<int>("SpawnCount")
                         .HasColumnType("integer");
 
@@ -320,6 +326,10 @@ namespace MoodyBlues.Backend.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ShareToken")
+                        .IsUnique()
+                        .HasFilter("\"ShareToken\" IS NOT NULL");
 
                     b.HasIndex("Status");
 

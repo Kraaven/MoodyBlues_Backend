@@ -330,8 +330,13 @@ names, for example `"Ready"`.
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}/archive` | Delete every archived version and their sessions |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/sessions` | Sessions, newest first. `?version=n` filters to one version (404 if it does not exist); `?awaitingScene=true` to sessions waiting for their scene |
-| `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts |
+| `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts, `isPublic` and `shareToken` |
 | `GET /api/sessions/{sessionId}/replay` | The compiled replay file (gzip-encoded) |
+| `PUT /api/sessions/{sessionId}/sharing` | `{ "isPublic": bool }` turns the public link on or off: `{ isPublic, shareToken }`. The token is created the first time it goes public and kept while private |
+| `POST /api/sessions/{sessionId}/sharing/reset` | Issue a new share token (the old link stops working): `{ isPublic, shareToken }` |
+| `GET /api/share/{token}` | Anonymous (rate limited, 404 unless the session is public): `{ session, projectName, sceneName, sceneVersion }` |
+| `GET /api/share/{token}/replay` | Anonymous: the session's replay file (gzip-encoded) |
+| `GET /api/share/{token}/scene` | Anonymous: the GLB of the version the session was recorded in |
 | `POST /api/sessions/{sessionId}/recompile` | Rebuild the replay from the raw log |
 | `DELETE /api/sessions/{sessionId}` | Delete one session (not while recording or compiling) |
 

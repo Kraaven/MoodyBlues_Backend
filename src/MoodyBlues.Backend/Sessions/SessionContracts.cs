@@ -23,7 +23,9 @@ public sealed record SessionSummaryResponse(
     int WarningLogCount,
     int ErrorLogCount,
     /// <summary>The session's activity glyph; null until the session is Ready.</summary>
-    SessionActivity? Activity);
+    SessionActivity? Activity,
+    bool IsPublic,
+    string? ShareToken);
 
 public sealed record SessionDetailResponse(
     Guid Id,
@@ -51,4 +53,13 @@ public sealed record SessionDetailResponse(
     int InfoLogCount,
     int WarningLogCount,
     int ErrorLogCount,
-    SessionActivity? Activity);
+    SessionActivity? Activity,
+    bool IsPublic,
+    string? ShareToken);
+
+public sealed record SharingRequest(bool IsPublic);
+
+public sealed record SharingResponse(bool IsPublic, string? ShareToken);
+
+/// <summary>What the anonymous share page needs: the session plus the names it displays.</summary>
+public sealed record SharedSessionResponse(SessionDetailResponse Session, string ProjectName, string SceneName, int? SceneVersion);
