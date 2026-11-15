@@ -101,8 +101,8 @@ public sealed class SceneProcessingWorker(
         catch (DbUpdateConcurrencyException)
         {
             // The version (or its scene) was deleted while it was processed; drop what was written.
-            SceneDeletion.TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneRevisionDir(revision.DeveloperId, revision.SceneId, revision.Hash)));
-            ConsoleLog.Info($"Scene processing: {revision.DeveloperId}/{revision.SceneId} v{revision.Version} was deleted while processing.");
+            SceneDeletion.TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneRevisionDir(revision.ProjectId, revision.SceneId, revision.Hash)));
+            ConsoleLog.Info($"Scene processing: {revision.ProjectId}/{revision.SceneId} v{revision.Version} was deleted while processing.");
         }
 
         return true;
@@ -110,11 +110,11 @@ public sealed class SceneProcessingWorker(
 
     public async Task ProcessAsync(SceneRevision revision, MoodyBluesDbContext db, IGltfOptimizer optimizer, CancellationToken cancellationToken)
     {
-        string label = $"developer={revision.DeveloperId} scene={revision.SceneId} hash={revision.Hash[..8]}";
+        string label = $"project={revision.ProjectId} scene={revision.SceneId} hash={revision.Hash[..8]}";
         revision.Status = SceneProcessingStatus.Processing;
         await db.SaveChangesAsync(cancellationToken);
 
-        string dir = StoragePaths.SceneRevisionDir(revision.DeveloperId, revision.SceneId, revision.Hash);
+        string dir = StoragePaths.SceneRevisionDir(revision.ProjectId, revision.SceneId, revision.Hash);
         string rawFull = paths.SceneFull(revision.RawGlbPath);
 
         // Step 1: registry

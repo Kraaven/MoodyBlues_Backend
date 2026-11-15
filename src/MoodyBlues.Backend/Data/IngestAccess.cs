@@ -1,7 +1,6 @@
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Ingest;
 
@@ -11,7 +10,7 @@ namespace MoodyBlues.Backend.Data;
 /// Who may use the Unity-facing endpoints (<c>/connection</c>, <c>/handshake</c>,
 /// <c>/scenes/check</c>, scene upload). The caller sends the project's ingest key in the
 /// <see cref="HeaderName"/> header, and the key alone identifies the project: the Unity client
-/// never sends a developer ID.
+/// never sends a project ID.
 ///
 /// The key only grants uploads: no dashboard route accepts it. It still ships inside game builds,
 /// so the quotas in <see cref="Config.ServerConfig"/> bound what a leaked key can cost, and the
@@ -32,8 +31,6 @@ public static class IngestAccess
 
     /// <summary>A new key: the prefix plus 256 random bits, base64url.</summary>
     public static string NewKey() => KeyPrefix + StreamTokens.NewToken();
-
-    public static string Hash(string key) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)));
 
     /// <summary>The part of a key the dashboard shows to identify it: the prefix plus 6 characters.</summary>
     public static string DisplayPrefix(string key) => key[..Math.Min(key.Length, KeyPrefix.Length + 6)];
@@ -64,10 +61,10 @@ public static class IngestAccess
             return (null, Results.Json(UnknownKeyMessage, statusCode: StatusCodes.Status401Unauthorized));
         }
 
-        string hash = Hash(key);
+        string hash = Hashing.Sha256Hex(key);
         IngestProject? project = await db.Projects
             .Where(p => p.IngestKeyHash == hash)
-            .Select(p => new IngestProject(p.DeveloperId, p.Name))
+            .Select(p => new IngestProject(p.Id, p.Name))
             .FirstOrDefaultAsync();
 
         return project is null
@@ -77,4 +74,4 @@ public static class IngestAccess
 }
 
 /// <summary>The project an ingest request writes to.</summary>
-public sealed record IngestProject(string DeveloperId, string Name);
+public sealed record IngestProject(Guid ProjectId, string Name);

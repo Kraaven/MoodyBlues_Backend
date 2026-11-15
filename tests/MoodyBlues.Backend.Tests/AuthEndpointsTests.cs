@@ -27,7 +27,7 @@ public class AuthEndpointsTests
         HttpResponse httpResponse = NewResponse();
 
         var result = await AuthEndpoints.RegisterAsync(request, httpResponse, db, Jwt, Config);
-        var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<AuthResponse>(result);
+        var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<UserResponse>(result);
 
         Assert.NotNull(response);
         Assert.Equal("new.user@example.com", response!.Email);
@@ -76,27 +76,10 @@ public class AuthEndpointsTests
         HttpResponse httpResponse = NewResponse();
 
         var result = await AuthEndpoints.LoginAsync(new LoginRequest("login@example.com", "correct-password"), httpResponse, db, Jwt, Config);
-        var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<AuthResponse>(result);
+        var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<UserResponse>(result);
 
         Assert.Equal("login@example.com", response!.Email);
         Assert.Contains($"{AuthCookies.AccessCookie}=", SetCookies(httpResponse));
-    }
-
-    [Fact]
-    public async Task Login_UpgradesAnOldPasswordHash()
-    {
-        using var db = TestDbContextFactory.Create();
-        string oldHash = OldHash("correct-password", 100_000);
-        db.Users.Add(new User { Id = Guid.NewGuid(), Email = "old@example.com", PasswordHash = oldHash, CreatedAtUtc = DateTime.UtcNow });
-        await db.SaveChangesAsync();
-
-        var result = await AuthEndpoints.LoginAsync(new LoginRequest("old@example.com", "correct-password"), NewResponse(), db, Jwt, Config);
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(result);
-
-        Assert.Equal(200, status);
-        string upgraded = (await db.Users.SingleAsync()).PasswordHash;
-        Assert.StartsWith($"{PasswordHasher.Iterations}.", upgraded);
-        Assert.True(PasswordHasher.Verify("correct-password", upgraded));
     }
 
     [Fact]
@@ -122,12 +105,5 @@ public class AuthEndpointsTests
 
         Assert.Equal(401, statusCode);
         Assert.Contains(AuthEndpoints.LoginFailedMessage, body);
-    }
-
-    private static string OldHash(string password, int iterations)
-    {
-        byte[] salt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
-        byte[] hash = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
-        return $"{iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(hash)}";
     }
 }

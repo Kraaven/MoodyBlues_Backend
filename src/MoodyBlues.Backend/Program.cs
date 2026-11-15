@@ -54,8 +54,7 @@ builder.Services.AddHostedService<CompileWorker>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
 
-bool trustForwardedHeaders = Environment.GetEnvironmentVariable("MOODYBLUES_TRUST_FORWARDED_HEADERS") is "1" or "true" or "True";
-builder.Services.AddMoodyBluesRateLimits(trustForwardedHeaders);
+builder.Services.AddMoodyBluesRateLimits(config.TrustForwardedHeaders);
 
 // Enums travel as their names ("Ready", not 3) so the dashboard needs no lookup table.
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -88,7 +87,7 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
-if (trustForwardedHeaders)
+if (config.TrustForwardedHeaders)
 {
     // Only safe when the backend is reachable solely through the reverse proxy (docker-compose
     // publishes no backend port); otherwise a client could spoof its IP for rate limiting.
@@ -108,7 +107,7 @@ using (IServiceScope migrationScope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
-if (trustForwardedHeaders)
+if (config.TrustForwardedHeaders)
 {
     app.UseForwardedHeaders();
 }

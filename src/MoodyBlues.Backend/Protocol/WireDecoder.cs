@@ -14,16 +14,8 @@ namespace MoodyBlues.Backend.Protocol;
 /// </summary>
 public sealed class WireDecoder
 {
-    private readonly bool _requireBeginSession;
-
-    public WireDecoder(bool requireBeginSession = true)
-    {
-        _requireBeginSession = requireBeginSession;
-        Ranges = WireRanges.Default;
-    }
-
     /// <summary>Ranges declared by the most recent BeginSession (defaults until then).</summary>
-    public WireRanges Ranges { get; private set; }
+    public WireRanges Ranges { get; private set; } = WireRanges.Default;
 
     public bool HasBegunSession { get; private set; }
 
@@ -52,7 +44,7 @@ public sealed class WireDecoder
 
             if (type == (byte)EventType.BeginSession)
             {
-                // Checked before the size: an older client's BeginSession has a different length.
+                // Checked before the size: a client on another protocol version may send a BeginSession of a different length.
                 if (offset + 3 > message.Length)
                 {
                     throw new ProtocolException($"Truncated BeginSession at offset {offset}.");
@@ -84,7 +76,7 @@ public sealed class WireDecoder
 
                 begun = true;
             }
-            else if (_requireBeginSession && !begun)
+            else if (!begun)
             {
                 throw new ProtocolException($"Expected BeginSession as the first event of the connection, got {(EventType)type}.");
             }

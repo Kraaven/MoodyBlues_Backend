@@ -5,7 +5,7 @@ using MoodyBlues.Backend.Protocol;
 namespace MoodyBlues.Backend.Tests;
 
 /// <summary>
-/// Test-only encoders that mirror Spec.md Section 7's quantization scheme.
+/// Test-only encoders that mirror Spec.md Section 9's quantization scheme.
 ///
 /// These exist purely so the test suite can build known-good binary fixtures
 /// to exercise the real decoder (<see cref="EventParser"/>) without needing

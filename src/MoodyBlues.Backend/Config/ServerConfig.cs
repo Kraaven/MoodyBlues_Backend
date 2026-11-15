@@ -26,10 +26,10 @@ public sealed class ServerConfig
 
     public string DbConnectionString { get; init; } = "Host=localhost;Port=5432;Database=moodyblues;Username=moodyblues;Password=moodyblues";
 
-    /// <summary>Root for scene files: <c>{developerId}/{sceneId}/{hash}/raw.glb</c> and friends.</summary>
+    /// <summary>Root for scene files: <c>{projectId:N}/{sceneId}/{hash}/raw-*.glb</c> and friends.</summary>
     public string ScenesDir { get; init; } = "data/scenes";
 
-    /// <summary>Root for session files: <c>{developerId}/{sessionId}/raw.mblog</c> and <c>replay.mbr.gz</c>.</summary>
+    /// <summary>Root for session files: <c>{projectId:N}/{sessionId:N}/raw.mblog</c> and <c>replay.mbr.gz</c>.</summary>
     public string SessionsDir { get; init; } = "data/sessions";
 
     /// <summary>
@@ -65,8 +65,8 @@ public sealed class ServerConfig
     /// <summary>Stored scene versions per scene, current and archived together.</summary>
     public int MaxRevisionsPerScene { get; init; } = 200;
 
-    /// <summary>Sessions per developer that are recording at the same time.</summary>
-    public int MaxConcurrentSessionsPerDeveloper { get; init; } = 50;
+    /// <summary>Sessions per project that are recording at the same time.</summary>
+    public int MaxConcurrentSessionsPerProject { get; init; } = 50;
 
     /// <summary>Raw log size of one session. The stream is closed once it is reached.</summary>
     public long MaxSessionRawLogBytes { get; init; } = 512L * 1024 * 1024;
@@ -74,8 +74,8 @@ public sealed class ServerConfig
     /// <summary>Wall-clock length of one session, measured from its handshake.</summary>
     public TimeSpan MaxSessionDuration { get; init; } = TimeSpan.FromHours(6);
 
-    /// <summary>All scene and session files of one developer (project) together.</summary>
-    public long MaxStoragePerDeveloperBytes { get; init; } = 20L * 1024 * 1024 * 1024;
+    /// <summary>All scene and session files of one project together.</summary>
+    public long MaxStoragePerProjectBytes { get; init; } = 20L * 1024 * 1024 * 1024;
 
     /// <summary>One compile is cancelled after this long, so a pathological log cannot stall the worker.</summary>
     public TimeSpan CompileTimeout { get; init; } = TimeSpan.FromMinutes(10);
@@ -108,6 +108,12 @@ public sealed class ServerConfig
     /// </summary>
     public string CookieSameSite { get; init; } = "Lax";
 
+    /// <summary>
+    /// Trust X-Forwarded-For/Proto and CF-Connecting-IP. Only safe when the backend is reachable
+    /// solely through the reverse proxy (docker-compose publishes no backend port).
+    /// </summary>
+    public bool TrustForwardedHeaders { get; init; }
+
     /// <summary>Marks the dashboard cookies Secure (HTTPS only). On whenever <see cref="PublicScheme"/> is https.</summary>
     public bool CookieSecure => IsHttps;
 
@@ -131,10 +137,10 @@ public sealed class ServerConfig
             ReconnectGracePeriod = TimeSpan.FromSeconds(TryParseInt(Env("MOODYBLUES_RECONNECT_GRACE_SECONDS"), 60)),
             MaxSceneUploadBytes = TryParseInt(Env("MOODYBLUES_MAX_SCENE_UPLOAD_MB"), 512) * 1024L * 1024L,
             MaxRevisionsPerScene = TryParseInt(Env("MOODYBLUES_MAX_REVISIONS_PER_SCENE"), 200),
-            MaxConcurrentSessionsPerDeveloper = TryParseInt(Env("MOODYBLUES_MAX_CONCURRENT_SESSIONS"), 50),
+            MaxConcurrentSessionsPerProject = TryParseInt(Env("MOODYBLUES_MAX_CONCURRENT_SESSIONS"), 50),
             MaxSessionRawLogBytes = TryParseInt(Env("MOODYBLUES_MAX_SESSION_MB"), 512) * 1024L * 1024L,
             MaxSessionDuration = TimeSpan.FromMinutes(TryParseInt(Env("MOODYBLUES_MAX_SESSION_MINUTES"), 360)),
-            MaxStoragePerDeveloperBytes = TryParseInt(Env("MOODYBLUES_MAX_STORAGE_GB"), 20) * 1024L * 1024L * 1024L,
+            MaxStoragePerProjectBytes = TryParseInt(Env("MOODYBLUES_MAX_STORAGE_GB"), 20) * 1024L * 1024L * 1024L,
             CompileTimeout = TimeSpan.FromMinutes(Math.Max(1, TryParseInt(Env("MOODYBLUES_COMPILE_TIMEOUT_MINUTES"), 10))),
             OptimizerMemoryLimitMb = Math.Max(256, TryParseInt(Env("MOODYBLUES_OPTIMIZER_MEMORY_MB"), 2048)),
             GltfTransformCommand = Env("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
@@ -142,6 +148,7 @@ public sealed class ServerConfig
             CorsOrigins = ParseCorsOrigins(Env("MOODYBLUES_CORS_ORIGIN")),
             AccessTokenLifetime = TimeSpan.FromMinutes(Math.Clamp(TryParseInt(Env("MOODYBLUES_ACCESS_TOKEN_MINUTES"), 15), 1, 24 * 60)),
             RefreshTokenLifetime = TimeSpan.FromDays(Math.Clamp(TryParseInt(Env("MOODYBLUES_REFRESH_TOKEN_DAYS"), 14), 1, 365)),
+            TrustForwardedHeaders = Env("MOODYBLUES_TRUST_FORWARDED_HEADERS") is "1" or "true" or "True",
             CookieSameSite = Env("MOODYBLUES_COOKIE_SAMESITE")
                 ?? (string.Equals(Env("MOODYBLUES_PUBLIC_SCHEME"), "https", StringComparison.OrdinalIgnoreCase) ? "None" : "Lax"),
         };

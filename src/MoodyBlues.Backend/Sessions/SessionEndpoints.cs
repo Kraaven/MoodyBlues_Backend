@@ -4,20 +4,22 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
+using MoodyBlues.Backend.Compiler;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Projects;
 using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Sessions;
 
 /// <summary>
-/// Dashboard session operations. Every route needs a JWT and checks the caller owns the project
-/// the session's developerId belongs to (404 otherwise).
+/// Dashboard session operations. Every route needs a JWT and checks the caller owns the session's
+/// project (<see cref="ProjectAccess"/>; 404 otherwise).
 /// </summary>
 public static class SessionEndpoints
 {
     public static void Map(WebApplication app)
     {
-        app.MapGroup("/api/scenes/{developerId}/{sceneId}")
+        app.MapGroup("/api/projects/{projectId:guid}/scenes/{sceneId}")
             .RequireAuthorization()
             .MapGet("/sessions", ListAsync);
 
@@ -29,35 +31,31 @@ public static class SessionEndpoints
     }
 
     public static async Task<IResult> ListAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         int? version,
         bool? awaitingScene,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
     {
-        if (!CurrentUser.TryGetUserId(principal, out Guid userId))
+        (IResult? error, Project? _) = await ProjectAccess.FindOwnedAsync(db, principal, projectId);
+        if (error is not null)
         {
-            return Results.Unauthorized();
+            return error;
         }
 
-        if (!PathSegments.IsSafe(developerId) || !PathSegments.IsSafe(sceneId))
+        if (!PathSegments.IsSafe(sceneId))
         {
-            return Results.BadRequest("Invalid developerId or sceneId.");
+            return Results.BadRequest("Invalid sceneId.");
         }
 
-        if (!await db.Projects.AnyAsync(p => p.DeveloperId == developerId && p.UserId == userId))
-        {
-            return Results.NotFound();
-        }
-
-        IQueryable<Session> query = db.Sessions.Where(s => s.DeveloperId == developerId && s.SceneId == sceneId);
+        IQueryable<Session> query = db.Sessions.Where(s => s.ProjectId == projectId && s.SceneId == sceneId);
 
         if (version is { } v)
         {
             // ?version=N: sessions recorded in that version (the current one, or one in the archive).
             string? hash = await db.SceneRevisions
-                .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Version == v)
+                .Where(r => r.ProjectId == projectId && r.SceneId == sceneId && r.Version == v)
                 .Select(r => r.Hash)
                 .FirstOrDefaultAsync();
             if (hash is null)
@@ -70,23 +68,30 @@ public static class SessionEndpoints
         else if (awaitingScene == true)
         {
             // ?awaitingScene=true: sessions recorded in a version that has not been uploaded yet.
-            query = query.Where(s => !db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash));
+            query = query.Where(s => !db.SceneRevisions.Any(r => r.ProjectId == s.ProjectId && r.SceneId == s.SceneId && r.Hash == s.SceneHash));
         }
 
-        List<SessionSummaryResponse> sessions = await query
+        // The activity is stored as JSON text; it is parsed after the query, not inside it.
+        var rows = await query
             .OrderByDescending(s => s.CreatedAtUtc)
-            .Select(s => new SessionSummaryResponse(
-                s.Id, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.Status, s.EndedCleanly, s.DurationSeconds,
-                s.ObjectCount, s.SpawnCount, s.KeyframeCount, s.ReplaySizeBytes, s.RawLogSizeBytes,
-                db.SceneRevisions
-                    .Where(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash)
+            .Select(s => new
+            {
+                Session = s,
+                SceneVersion = db.SceneRevisions
+                    .Where(r => r.ProjectId == s.ProjectId && r.SceneId == s.SceneId && r.Hash == s.SceneHash)
                     .Select(r => (int?)r.Version)
                     .FirstOrDefault(),
-                s.ErrorMessage,
-                s.InfoLogCount,
-                s.WarningLogCount,
-                s.ErrorLogCount))
+            })
             .ToListAsync();
+
+        List<SessionSummaryResponse> sessions = rows
+            .Select(x => new SessionSummaryResponse(
+                x.Session.Id, x.Session.SceneId, x.Session.SceneHash, x.Session.CreatedAtUtc, x.Session.Status,
+                x.Session.EndedCleanly, x.Session.DurationSeconds, x.Session.ObjectCount, x.Session.SpawnCount,
+                x.Session.KeyframeCount, x.Session.ReplaySizeBytes, x.Session.RawLogSizeBytes, x.SceneVersion,
+                x.Session.ErrorMessage, x.Session.InfoLogCount, x.Session.WarningLogCount, x.Session.ErrorLogCount,
+                SessionActivity.FromJson(x.Session.ActivityJson)))
+            .ToList();
 
         return Results.Ok(sessions);
     }
@@ -100,10 +105,11 @@ public static class SessionEndpoints
         }
 
         return Results.Ok(new SessionDetailResponse(
-            s!.Id, s.DeveloperId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
-            s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.RawEventCount, s.KeyframeCount,
-            s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents,
-            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount));
+            s!.Id, s.ProjectId, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
+            s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.KeyframeCount,
+            s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents, s.RotationWidenings,
+            s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount,
+            SessionActivity.FromJson(s.ActivityJson)));
     }
 
     /// <summary>
@@ -187,11 +193,11 @@ public static class SessionEndpoints
             CurrentUser.TryGetUserId(principal, out Guid userId) ? userId : null,
             AuditLog.SessionDelete,
             session.Id.ToString(),
-            $"{session.DeveloperId}/{session.SceneId}, recorded {session.CreatedAtUtc:u}, {session.RawLogSizeBytes + session.ReplaySizeBytes} bytes");
+            $"{session.ProjectId}/{session.SceneId}, recorded {session.CreatedAtUtc:u}, {session.RawLogSizeBytes + session.ReplaySizeBytes} bytes");
         await db.SaveChangesAsync();
 
         // Files after the row, as in SceneDeletion: a failure leaves an orphaned folder, never a row without files.
-        Scenes.SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(session.DeveloperId, session.Id)));
+        Scenes.SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(session.ProjectId, session.Id)));
         return Results.NoContent();
     }
 
@@ -200,22 +206,18 @@ public static class SessionEndpoints
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
     {
-        if (!CurrentUser.TryGetUserId(principal, out Guid userId))
-        {
-            return (Results.Unauthorized(), null);
-        }
-
         if (!Guid.TryParse(sessionId, out Guid id))
         {
             return (Results.NotFound(), null);
         }
 
         Session? session = await db.Sessions.FindAsync(id);
-        if (session is null || !await db.Projects.AnyAsync(p => p.DeveloperId == session.DeveloperId && p.UserId == userId))
+        if (session is null)
         {
             return (Results.NotFound(), null);
         }
 
-        return (null, session);
+        (IResult? error, Project? _) = await ProjectAccess.FindOwnedAsync(db, principal, session.ProjectId);
+        return error is not null ? (error, null) : (null, session);
     }
 }

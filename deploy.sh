@@ -6,21 +6,24 @@
 # builds the Docker images, and starts Postgres + the backend. Re-run it with
 # the commands below to manage the running stack.
 #
-# Usage: ./deploy.sh [start|stop|restart|reset|logs|status|backup]
+# Usage: ./deploy.sh [start|stop|restart|reset|logs|status|backup|wipe]
 #
 #   start    (default) Build (if needed) and start the stack.
 #   stop     Stop the stack; containers/volumes are kept, so 'start' is fast.
 #   restart  stop, then start.
 #   reset    Stop the stack, git fetch/pull the latest changes, rebuild the
 #            backend image, and start the stack again -- the "update and
-#            restart" command.
+#            restart" command. Keeps all data.
 #   logs     Tail logs from both containers.
 #   status   Show container status.
 #   backup   Dump the database and archive the scene/session files into
 #            ./backups/<timestamp>/ (see README "Backup and restore").
+#   wipe     DELETES ALL DATA (database, scenes, sessions) and starts a fresh,
+#            empty stack. Asks you to type 'wipe'; './deploy.sh wipe --yes'
+#            skips the question for scripts. Run 'backup' first if unsure.
 #
 # All state (Postgres data, uploaded scenes, logs) lives in Docker named
-# volumes, so 'reset' and 'restart' don't lose any data.
+# volumes, so 'reset' and 'restart' don't lose any data; only 'wipe' does.
 set -euo pipefail
 
 REPO_URL="https://github.com/Kraaven/MoodyBlues_Backend.git"
@@ -59,6 +62,7 @@ cmd_stop() {
     compose stop
 }
 
+# Update and restart; keeps all data (the named volumes survive 'down').
 cmd_reset() {
     echo "Stopping the stack..."
     compose down
@@ -107,6 +111,33 @@ cmd_backup() {
     ls -lh "$dir"
 }
 
+# Removes the stack's named volumes (moodyblues-db-data, moodyblues-scenes, moodyblues-sessions;
+# see docker-compose.yml), then starts again. The backend creates the empty schema at startup.
+cmd_wipe() {
+    cat <<'MSG'
+This DELETES ALL DATA of this MoodyBlues stack and cannot be undone:
+  - the database (accounts, projects, scenes, sessions)    volume moodyblues-db-data
+  - every stored scene file                                volume moodyblues-scenes
+  - every recorded session and replay file                 volume moodyblues-sessions
+Then it rebuilds and starts a fresh, empty stack. Consider './deploy.sh backup' first.
+MSG
+
+    if [ "${2:-}" != "--yes" ]; then
+        local answer
+        read -r -p "Type 'wipe' to continue: " answer
+        if [ "$answer" != "wipe" ]; then
+            echo "Aborted; nothing was deleted."
+            exit 1
+        fi
+    fi
+
+    echo "Removing the stack and its volumes..."
+    compose down -v
+    echo "Rebuilding and starting an empty stack..."
+    compose up -d --build
+    compose ps
+}
+
 resolve_repo_root
 
 case "${1:-start}" in
@@ -117,8 +148,9 @@ case "${1:-start}" in
     logs)    cmd_logs ;;
     status)  cmd_status ;;
     backup)  cmd_backup ;;
+    wipe)    cmd_wipe "$@" ;;
     *)
-        echo "Usage: $0 {start|stop|restart|reset|logs|status|backup}" >&2
+        echo "Usage: $0 {start|stop|restart|reset|logs|status|backup|wipe [--yes]}" >&2
         exit 1
         ;;
 esac

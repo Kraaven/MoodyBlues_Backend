@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Ingest;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Storage;
 
@@ -43,9 +44,9 @@ public static class SceneUploadEndpoints
     {
         string? sceneHash = request.Query["sceneHash"];
 
-        if (!PathSegments.IsSafe(sceneId) || !PathSegments.IsSceneHash(sceneHash))
+        if (IngestScenes.Validate(sceneId, sceneHash) is { } invalid)
         {
-            return Results.BadRequest("sceneId and a 64-character lowercase hex sceneHash are required.");
+            return invalid;
         }
 
         (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, request);
@@ -54,23 +55,23 @@ public static class SceneUploadEndpoints
             return denied;
         }
 
-        string developerId = project!.DeveloperId;
+        Guid projectId = project!.ProjectId;
 
-        if (await RevisionExistsAsync(db, developerId, sceneId, sceneHash!))
+        if (await SceneRevisions.ExistsAsync(db, projectId, sceneId, sceneHash!))
         {
             return Results.Ok(); // already have this version; versions never change
         }
 
         if (config.MaxRevisionsPerScene > 0 &&
-            await db.SceneRevisions.CountAsync(r => r.DeveloperId == developerId && r.SceneId == sceneId) >= config.MaxRevisionsPerScene)
+            await db.SceneRevisions.CountAsync(r => r.ProjectId == projectId && r.SceneId == sceneId) >= config.MaxRevisionsPerScene)
         {
             return Results.Problem(
                 $"This scene already has {config.MaxRevisionsPerScene} stored versions. Delete archived versions in the dashboard to upload more.",
                 statusCode: StatusCodes.Status507InsufficientStorage);
         }
 
-        if (config.MaxStoragePerDeveloperBytes > 0 &&
-            await StorageQuota.UsedBytesAsync(db, developerId) >= config.MaxStoragePerDeveloperBytes)
+        if (config.MaxStoragePerProjectBytes > 0 &&
+            await StorageQuota.UsedBytesAsync(db, projectId) >= config.MaxStoragePerProjectBytes)
         {
             return Results.Problem(
                 "This project has reached its storage limit. Delete archived versions or old sessions in the dashboard.",
@@ -87,7 +88,7 @@ public static class SceneUploadEndpoints
         }
 
         // A file per upload, so a concurrent upload of the same hash cannot replace this one.
-        string dir = StoragePaths.SceneRevisionDir(developerId, sceneId, sceneHash!);
+        string dir = StoragePaths.SceneRevisionDir(projectId, sceneId, sceneHash!);
         string rawRelative = Path.Combine(dir, $"raw-{Guid.NewGuid():N}.glb");
         string rawFull = paths.SceneFull(rawRelative);
 
@@ -146,16 +147,16 @@ public static class SceneUploadEndpoints
         {
             DateTime now = DateTime.UtcNow;
             int version = 1 + (await db.SceneRevisions
-                .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId)
+                .Where(r => r.ProjectId == projectId && r.SceneId == sceneId)
                 .Select(r => (int?)r.Version)
                 .MaxAsync() ?? 0);
 
-            Scene? scene = await db.Scenes.FindAsync(developerId, sceneId);
+            Scene? scene = await db.Scenes.FindAsync(projectId, sceneId);
             if (scene is null)
             {
                 db.Scenes.Add(new Scene
                 {
-                    DeveloperId = developerId,
+                    ProjectId = projectId,
                     SceneId = sceneId,
                     LatestHash = sceneHash!,
                     CreatedAtUtc = now,
@@ -170,7 +171,7 @@ public static class SceneUploadEndpoints
 
             db.SceneRevisions.Add(new SceneRevision
             {
-                DeveloperId = developerId,
+                ProjectId = projectId,
                 SceneId = sceneId,
                 Hash = sceneHash!,
                 Version = version,
@@ -183,7 +184,7 @@ public static class SceneUploadEndpoints
 
             // Sessions recorded before this version arrived can now compile.
             List<Session> waiting = await db.Sessions
-                .Where(s => s.DeveloperId == developerId && s.SceneId == sceneId && s.SceneHash == sceneHash &&
+                .Where(s => s.ProjectId == projectId && s.SceneId == sceneId && s.SceneHash == sceneHash &&
                             s.Status == SessionStatus.WaitingForScene)
                 .ToListAsync();
             foreach (Session s in waiting)
@@ -196,7 +197,7 @@ public static class SceneUploadEndpoints
                 await db.SaveChangesAsync();
                 signal.Signal.Notify();
                 ConsoleLog.Info(
-                    $"Scene upload: developer={developerId} scene={sceneId} v{version} hash={sceneHash![..8]} bytes={written}" +
+                    $"Scene upload: project={projectId} scene={sceneId} v{version} hash={sceneHash![..8]} bytes={written}" +
                     (skippedMeshes > 0 ? $" skippedMeshes={skippedMeshes}" : "") +
                     (waiting.Count > 0 ? $", {waiting.Count} waiting session(s) queued" : ""));
                 return Results.Ok();
@@ -204,7 +205,7 @@ public static class SceneUploadEndpoints
             catch (DbUpdateException)
             {
                 db.ChangeTracker.Clear();
-                if (await RevisionExistsAsync(db, developerId, sceneId, sceneHash!))
+                if (await SceneRevisions.ExistsAsync(db, projectId, sceneId, sceneHash!))
                 {
                     // A concurrent upload of the same hash won; it keeps its own file.
                     TryDelete(rawFull);
@@ -218,9 +219,6 @@ public static class SceneUploadEndpoints
         TryDelete(rawFull);
         return Results.Problem("Could not store the scene version; try again.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
-
-    private static Task<bool> RevisionExistsAsync(MoodyBluesDbContext db, string developerId, string sceneId, string hash) =>
-        db.SceneRevisions.AnyAsync(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Hash == hash);
 
     private static void TryDelete(string fullPath)
     {

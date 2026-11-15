@@ -15,7 +15,6 @@ public sealed record SceneResponse(
     string LatestHash,
     long SizeBytes,
     SceneProcessingStatus ProcessingStatus,
-    int RevisionCount,
     int CurrentVersion);
 
 /// <summary>One stored version of a scene.</summary>
@@ -33,12 +32,12 @@ public sealed record SceneVersionResponse(
     long SessionBytes);
 
 /// <summary>
-/// <c>GET /api/scenes/{developerId}/{sceneId}</c>: the scene, its current version, and every
+/// <c>GET /api/projects/{projectId}/scenes/{sceneId}</c>: the scene, its current version, and every
 /// archived version, newest first. <see cref="AwaitingSceneSessionCount"/> counts sessions
 /// recorded in a version that has not been uploaded yet.
 /// </summary>
 public sealed record SceneDetailResponse(
-    string DeveloperId,
+    Guid ProjectId,
     string SceneId,
     string? DisplayName,
     DateTime CreatedAtUtc,

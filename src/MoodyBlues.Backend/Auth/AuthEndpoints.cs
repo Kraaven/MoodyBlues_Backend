@@ -115,13 +115,6 @@ public static class AuthEndpoints
             return Results.Json(LoginFailedMessage, statusCode: StatusCodes.Status401Unauthorized);
         }
 
-        // Hashes from before the iteration increase are upgraded the first time they are used.
-        if (PasswordHasher.NeedsRehash(user.PasswordHash))
-        {
-            user.PasswordHash = PasswordHasher.Hash(password);
-            await db.SaveChangesAsync();
-        }
-
         return await SignInAsync(response, db, jwt, config, user);
     }
 
@@ -141,7 +134,7 @@ public static class AuthEndpoints
 
         (User user, RefreshTokens.Issued token) = rotated.Value;
         AuthCookies.Set(response, config, jwt.IssueToken(user), token.Token, token.ExpiresAtUtc);
-        return Results.Ok(new AuthResponse(user.Id, user.Email));
+        return Results.Ok(new UserResponse(user.Id, user.Email));
     }
 
     public static async Task<IResult> LogoutAsync(HttpRequest request, HttpResponse response, MoodyBluesDbContext db, ServerConfig config)
@@ -155,7 +148,7 @@ public static class AuthEndpoints
     {
         RefreshTokens.Issued refresh = await RefreshTokens.IssueAsync(db, config, user.Id);
         AuthCookies.Set(response, config, jwt.IssueToken(user), refresh.Token, refresh.ExpiresAtUtc);
-        return Results.Ok(new AuthResponse(user.Id, user.Email));
+        return Results.Ok(new UserResponse(user.Id, user.Email));
     }
 
     private static IResult Me(ClaimsPrincipal principal)
@@ -166,6 +159,6 @@ public static class AuthEndpoints
         }
 
         string email = principal.FindFirstValue(ClaimTypes.Email) ?? string.Empty;
-        return Results.Ok(new MeResponse(userId, email));
+        return Results.Ok(new UserResponse(userId, email));
     }
 }

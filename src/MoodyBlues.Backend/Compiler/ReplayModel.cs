@@ -109,6 +109,8 @@ public sealed class CompiledReplay
 
     public uint DeltaPromotions { get; init; }
 
+    public uint RotationWidenings { get; init; }
+
     public uint HardClamps { get; init; }
 
     public uint DroppedEvents { get; init; }

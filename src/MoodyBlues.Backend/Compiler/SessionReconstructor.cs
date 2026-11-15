@@ -153,7 +153,7 @@ public sealed class SessionReconstructor : IWireEventSink
             {
                 uint index = record.Connection;
                 _latestConnection = index;
-                _decoders[index] = new WireDecoder(requireBeginSession: true);
+                _decoders[index] = new WireDecoder();
                 _connectionCount++;
                 AddMarker(ReplayEventType.Connected, aux: 0, a: (ushort)Math.Min(index, ushort.MaxValue));
                 break;
@@ -162,7 +162,7 @@ public sealed class SessionReconstructor : IWireEventSink
             case RawLogRecordKind.Message:
                 if (!_decoders.TryGetValue(connection, out WireDecoder? decoder))
                 {
-                    decoder = new WireDecoder(requireBeginSession: true);
+                    decoder = new WireDecoder();
                     _decoders[connection] = decoder;
                 }
 
@@ -235,6 +235,7 @@ public sealed class SessionReconstructor : IWireEventSink
             ConnectionCount = _connectionCount,
             RawEventCount = _rawEventCount,
             DeltaPromotions = _endInfo.DeltaPromotions,
+            RotationWidenings = _endInfo.RotationWidenings,
             HardClamps = _endInfo.HardClamps,
             DroppedEvents = _endInfo.DroppedEvents,
             UnknownObjectEvents = _unknownObjectEvents,

@@ -7,20 +7,21 @@ using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Ingest;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Projects;
 using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Scenes;
 
 /// <summary>
-/// Dashboard scene operations under <c>/api/scenes/{developerId}/{sceneId}</c>. Every route needs
-/// a JWT and checks the caller owns the project that <c>developerId</c> belongs to; non-owners
+/// Dashboard scene operations under <c>/api/projects/{projectId}/scenes/{sceneId}</c>. Every route
+/// needs a JWT and checks the caller owns the project (<see cref="ProjectAccess"/>); non-owners
 /// get 404 so scene existence is not revealed.
 /// </summary>
 public static class SceneEndpoints
 {
     public static void Map(WebApplication app)
     {
-        var group = app.MapGroup("/api/scenes/{developerId}/{sceneId}").RequireAuthorization();
+        var group = app.MapGroup("/api/projects/{projectId:guid}/scenes/{sceneId}").RequireAuthorization();
         group.MapGet("/", GetAsync);
         group.MapPatch("/", RenameAsync);
         group.MapDelete("/", DeleteSceneAsync);
@@ -30,9 +31,9 @@ public static class SceneEndpoints
     }
 
     /// <summary>The scene with its current version and every archived version.</summary>
-    public static async Task<IResult> GetAsync(string developerId, string sceneId, ClaimsPrincipal principal, MoodyBluesDbContext db)
+    public static async Task<IResult> GetAsync(Guid projectId, string sceneId, ClaimsPrincipal principal, MoodyBluesDbContext db)
     {
-        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
@@ -46,27 +47,27 @@ public static class SceneEndpoints
     /// closed first) and all their files. The next upload from any build starts it again at v1.
     /// </summary>
     public static async Task<IResult> DeleteSceneAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
         StoragePaths paths,
         ActiveConnections connections)
     {
-        (IResult? error, Scene? _) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? _) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
-        List<SceneRevision> all = await db.SceneRevisions.Where(r => r.DeveloperId == developerId && r.SceneId == sceneId).ToListAsync();
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, all, deleteScene: true, UserIdOf(principal), AuditLog.SceneDelete);
+        List<SceneRevision> all = await db.SceneRevisions.Where(r => r.ProjectId == projectId && r.SceneId == sceneId).ToListAsync();
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, projectId, sceneId, all, deleteScene: true, UserIdOf(principal), AuditLog.SceneDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
     /// <summary>Deletes one archived version and its sessions. The current version cannot be deleted on its own.</summary>
     public static async Task<IResult> DeleteVersionAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         int version,
         ClaimsPrincipal principal,
@@ -74,14 +75,14 @@ public static class SceneEndpoints
         StoragePaths paths,
         ActiveConnections connections)
     {
-        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
         SceneRevision? revision = await db.SceneRevisions
-            .FirstOrDefaultAsync(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Version == version);
+            .FirstOrDefaultAsync(r => r.ProjectId == projectId && r.SceneId == sceneId && r.Version == version);
         if (revision is null)
         {
             return Results.NotFound("That version does not exist.");
@@ -92,41 +93,41 @@ public static class SceneEndpoints
             return Results.Conflict("This is the scene's current version. Delete the scene instead.");
         }
 
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, [revision], deleteScene: false, UserIdOf(principal), AuditLog.SceneVersionDelete);
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, projectId, sceneId, [revision], deleteScene: false, UserIdOf(principal), AuditLog.SceneVersionDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
     /// <summary>Deletes every archived version and their sessions, keeping the current version.</summary>
     public static async Task<IResult> DeleteArchiveAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db,
         StoragePaths paths,
         ActiveConnections connections)
     {
-        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
         }
 
         List<SceneRevision> archived = await db.SceneRevisions
-            .Where(r => r.DeveloperId == developerId && r.SceneId == sceneId && r.Hash != scene!.LatestHash)
+            .Where(r => r.ProjectId == projectId && r.SceneId == sceneId && r.Hash != scene!.LatestHash)
             .ToListAsync();
 
-        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, developerId, sceneId, archived, deleteScene: false, UserIdOf(principal), AuditLog.SceneArchiveDelete);
+        DeletionResult result = await SceneDeletion.DeleteAsync(db, paths, connections, projectId, sceneId, archived, deleteScene: false, UserIdOf(principal), AuditLog.SceneArchiveDelete);
         return Results.Ok(new DeleteResponse(result.Versions, result.Sessions, result.Bytes));
     }
 
     public static async Task<IResult> RenameAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         RenameSceneRequest request,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
     {
-        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
@@ -136,7 +137,8 @@ public static class SceneEndpoints
         scene!.DisplayName = string.IsNullOrWhiteSpace(displayName) ? null : displayName[..Math.Min(displayName.Length, 200)];
         await db.SaveChangesAsync();
 
-        return Results.Ok(await ToResponseAsync(scene, db));
+        SceneRevision? latest = await db.SceneRevisions.FindAsync(projectId, sceneId, scene.LatestHash);
+        return Results.Ok(ToResponse(scene, latest));
     }
 
     /// <summary>
@@ -145,7 +147,7 @@ public static class SceneEndpoints
     /// exists; the raw upload is the fallback. Revisions never change, so the response is cacheable.
     /// </summary>
     public static async Task<IResult> DownloadAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         string? hash,
         ClaimsPrincipal principal,
@@ -153,7 +155,7 @@ public static class SceneEndpoints
         StoragePaths paths,
         HttpContext httpContext)
     {
-        (IResult? error, Scene? scene) = await CheckOwnershipAsync(developerId, sceneId, principal, db);
+        (IResult? error, Scene? scene) = await CheckOwnershipAsync(projectId, sceneId, principal, db);
         if (error is not null)
         {
             return error;
@@ -165,7 +167,7 @@ public static class SceneEndpoints
             return Results.BadRequest("hash must be 64 lowercase hex characters.");
         }
 
-        SceneRevision? revision = await db.SceneRevisions.FindAsync(developerId, sceneId, revisionHash);
+        SceneRevision? revision = await db.SceneRevisions.FindAsync(projectId, sceneId, revisionHash);
         if (revision is null)
         {
             return Results.NotFound("That scene revision was never uploaded.");
@@ -178,7 +180,7 @@ public static class SceneEndpoints
 
         if (!File.Exists(fullPath))
         {
-            ConsoleLog.Error($"Scene download: file missing on disk for {developerId}/{sceneId}/{revisionHash}: {fullPath}");
+            ConsoleLog.Error($"Scene download: file missing on disk for {projectId}/{sceneId}/{revisionHash}: {fullPath}");
             return Results.NotFound("Scene file is not on disk.");
         }
 
@@ -192,30 +194,28 @@ public static class SceneEndpoints
         return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
     }
 
-    internal static async Task<SceneResponse> ToResponseAsync(Scene scene, MoodyBluesDbContext db)
-    {
-        SceneRevision? latest = await db.SceneRevisions.FindAsync(scene.DeveloperId, scene.SceneId, scene.LatestHash);
-        int revisionCount = await db.SceneRevisions.CountAsync(r => r.DeveloperId == scene.DeveloperId && r.SceneId == scene.SceneId);
-        return new SceneResponse(
-            scene.SceneId,
-            scene.DisplayName,
-            scene.UpdatedAtUtc,
-            scene.LatestHash,
-            latest?.ServableSizeBytes ?? 0,
-            latest?.Status ?? SceneProcessingStatus.Pending,
-            revisionCount,
-            latest?.Version ?? 0);
-    }
+    /// <summary>
+    /// The list/summary form of a scene. Takes its current revision so a project's scenes can be
+    /// built from one query instead of one per scene (null while the revision row is missing).
+    /// </summary>
+    internal static SceneResponse ToResponse(Scene scene, SceneRevision? latest) => new(
+        scene.SceneId,
+        scene.DisplayName,
+        scene.UpdatedAtUtc,
+        scene.LatestHash,
+        latest?.ServableSizeBytes ?? 0,
+        latest?.Status ?? SceneProcessingStatus.Pending,
+        latest?.Version ?? 0);
 
     internal static async Task<SceneDetailResponse> ToDetailAsync(Scene scene, MoodyBluesDbContext db)
     {
         List<SceneRevision> revisions = await db.SceneRevisions
-            .Where(r => r.DeveloperId == scene.DeveloperId && r.SceneId == scene.SceneId)
+            .Where(r => r.ProjectId == scene.ProjectId && r.SceneId == scene.SceneId)
             .OrderByDescending(r => r.Version)
             .ToListAsync();
 
         var sessionStats = await db.Sessions
-            .Where(s => s.DeveloperId == scene.DeveloperId && s.SceneId == scene.SceneId)
+            .Where(s => s.ProjectId == scene.ProjectId && s.SceneId == scene.SceneId)
             .GroupBy(s => s.SceneHash)
             .Select(g => new { Hash = g.Key, Count = g.Count(), Bytes = g.Sum(s => s.RawLogSizeBytes + s.ReplaySizeBytes) })
             .ToListAsync();
@@ -244,7 +244,7 @@ public static class SceneEndpoints
 
         SceneRevision? current = revisions.FirstOrDefault(r => r.Hash == scene.LatestHash);
         return new SceneDetailResponse(
-            scene.DeveloperId,
+            scene.ProjectId,
             scene.SceneId,
             scene.DisplayName,
             scene.CreatedAtUtc,
@@ -258,28 +258,23 @@ public static class SceneEndpoints
     private static Guid? UserIdOf(ClaimsPrincipal principal) => CurrentUser.TryGetUserId(principal, out Guid id) ? id : null;
 
     internal static async Task<(IResult? Error, Scene? Scene)> CheckOwnershipAsync(
-        string developerId,
+        Guid projectId,
         string sceneId,
         ClaimsPrincipal principal,
         MoodyBluesDbContext db)
     {
-        if (!CurrentUser.TryGetUserId(principal, out Guid userId))
+        (IResult? error, Project? _) = await ProjectAccess.FindOwnedAsync(db, principal, projectId);
+        if (error is not null)
         {
-            return (Results.Unauthorized(), null);
+            return (error, null);
         }
 
-        if (!PathSegments.IsSafe(developerId) || !PathSegments.IsSafe(sceneId))
+        if (!PathSegments.IsSafe(sceneId))
         {
-            return (Results.BadRequest("Invalid developerId or sceneId."), null);
+            return (Results.BadRequest("Invalid sceneId."), null);
         }
 
-        bool owns = await db.Projects.AnyAsync(p => p.DeveloperId == developerId && p.UserId == userId);
-        if (!owns)
-        {
-            return (Results.NotFound(), null);
-        }
-
-        Scene? scene = await db.Scenes.FindAsync(developerId, sceneId);
+        Scene? scene = await db.Scenes.FindAsync(projectId, sceneId);
         return scene is null ? (Results.NotFound(), null) : (null, scene);
     }
 }

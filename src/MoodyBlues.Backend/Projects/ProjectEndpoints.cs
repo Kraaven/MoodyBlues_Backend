@@ -8,6 +8,7 @@ using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Logging;
+using MoodyBlues.Backend.Scenes;
 
 namespace MoodyBlues.Backend.Projects;
 
@@ -40,16 +41,16 @@ public static class ProjectEndpoints
             .OrderByDescending(p => p.CreatedAtUtc)
             .ToListAsync();
 
-        List<string> developerIds = projects.Select(p => p.DeveloperId).ToList();
-        Dictionary<string, int> sceneCounts = await db.Scenes
-            .Where(s => developerIds.Contains(s.DeveloperId))
-            .GroupBy(s => s.DeveloperId)
+        List<Guid> projectIds = projects.Select(p => p.Id).ToList();
+        Dictionary<Guid, int> sceneCounts = await db.Scenes
+            .Where(s => projectIds.Contains(s.ProjectId))
+            .GroupBy(s => s.ProjectId)
             .Select(g => new { g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.Key, x => x.Count);
 
         var responses = projects
             .Select(p => new ProjectSummaryResponse(
-                p.Id, p.Name, p.DeveloperId, p.CreatedAtUtc, sceneCounts.GetValueOrDefault(p.DeveloperId), p.IngestKeyPrefix, p.IngestKeyCreatedAtUtc))
+                p.Id, p.Name, p.CreatedAtUtc, sceneCounts.GetValueOrDefault(p.Id), p.IngestKeyPrefix, p.IngestKeyCreatedAtUtc))
             .ToList();
 
         return Results.Ok(responses);
@@ -73,28 +74,28 @@ public static class ProjectEndpoints
             return Results.BadRequest("A project name of 1-200 characters is required.");
         }
 
-        string developerId = await GenerateUniqueDeveloperIdAsync(db);
+        var id = Guid.NewGuid();
+        DateTime now = DateTime.UtcNow;
+        IngestKeyMaterial key = IngestKeyMaterial.Create(protector, id);
         var project = new Project
         {
-            Id = Guid.NewGuid(),
+            Id = id,
             UserId = userId,
             Name = name,
-            DeveloperId = developerId,
-            CreatedAtUtc = DateTime.UtcNow,
+            CreatedAtUtc = now,
+            IngestKeyHash = key.Hash,
+            IngestKeyEncrypted = key.Encrypted,
+            IngestKeyPrefix = key.Prefix,
+            IngestKeyCreatedAtUtc = now,
         };
-        SetNewKey(project, protector, project.CreatedAtUtc);
 
         db.Projects.Add(project);
         await db.SaveChangesAsync();
 
-        // Pre-provision the Developer row so the dashboard has something to join against even
-        // before the first Unity handshake for this developerId ever arrives.
-        await DeveloperProvisioning.EnsureExistsAsync(db, developerId);
-
-        ConsoleLog.Info($"Created project '{project.Name}' ({project.Id}) developerId={developerId} for user={userId}");
+        ConsoleLog.Info($"Created project '{project.Name}' ({project.Id}) for user={userId}");
 
         return Results.Ok(new ProjectSummaryResponse(
-            project.Id, project.Name, project.DeveloperId, project.CreatedAtUtc, SceneCount: 0,
+            project.Id, project.Name, project.CreatedAtUtc, SceneCount: 0,
             project.IngestKeyPrefix, project.IngestKeyCreatedAtUtc));
     }
 
@@ -102,33 +103,36 @@ public static class ProjectEndpoints
     public static async Task<IResult> GetAsync(
         Guid id, ClaimsPrincipal principal, MoodyBluesDbContext db, ServerConfig config, IngestKeyProtector protector)
     {
-        if (!CurrentUser.TryGetUserId(principal, out Guid userId))
+        (IResult? error, Project? project) = await ProjectAccess.FindOwnedAsync(db, principal, id);
+        if (error is not null)
         {
-            return Results.Unauthorized();
-        }
-
-        Project? project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.UserId == userId);
-        if (project is null)
-        {
-            return Results.NotFound();
+            return error;
         }
 
         List<Scene> scenes = await db.Scenes
-            .Where(s => s.DeveloperId == project.DeveloperId)
+            .Where(s => s.ProjectId == id)
             .OrderByDescending(s => s.UpdatedAtUtc)
             .ToListAsync();
 
-        var sceneResponses = new List<Scenes.SceneResponse>(scenes.Count);
-        foreach (Scene scene in scenes)
-        {
-            sceneResponses.Add(await Scenes.SceneEndpoints.ToResponseAsync(scene, db));
-        }
+        // One query for every scene's current revision, not one per scene.
+        Dictionary<string, SceneRevision> latest = await db.Scenes
+            .Where(s => s.ProjectId == id)
+            .Join(
+                db.SceneRevisions,
+                s => new { s.ProjectId, s.SceneId, Hash = s.LatestHash },
+                r => new { r.ProjectId, r.SceneId, r.Hash },
+                (s, r) => r)
+            .ToDictionaryAsync(r => r.SceneId, StringComparer.Ordinal);
 
-        string? key = protector.TryUnprotect(project.IngestKeyEncrypted, project.Id);
+        List<SceneResponse> sceneResponses = scenes
+            .Select(scene => SceneEndpoints.ToResponse(scene, latest.GetValueOrDefault(scene.SceneId)))
+            .ToList();
+
+        string? key = protector.TryUnprotect(project!.IngestKeyEncrypted, project.Id);
         string? connectionString = key is null ? null : IngestAccess.ConnectionString(config, key);
 
         return Results.Ok(new ProjectDetailResponse(
-            project.Id, project.Name, project.DeveloperId, project.CreatedAtUtc, sceneResponses,
+            project.Id, project.Name, project.CreatedAtUtc, sceneResponses,
             project.IngestKeyPrefix, project.IngestKeyCreatedAtUtc, connectionString));
     }
 
@@ -139,54 +143,37 @@ public static class ProjectEndpoints
     public static async Task<IResult> RotateIngestKeyAsync(
         Guid id, ClaimsPrincipal principal, MoodyBluesDbContext db, ServerConfig config, IngestKeyProtector protector)
     {
-        if (!CurrentUser.TryGetUserId(principal, out Guid userId))
+        (IResult? error, Project? project) = await ProjectAccess.FindOwnedAsync(db, principal, id);
+        if (error is not null)
         {
-            return Results.Unauthorized();
+            return error;
         }
 
-        Project? project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.UserId == userId);
-        if (project is null)
-        {
-            return Results.NotFound();
-        }
-
-        bool replaced = project.IngestKeyHash is not null;
         DateTime now = DateTime.UtcNow;
-        string key = SetNewKey(project, protector, now);
+        IngestKeyMaterial key = IngestKeyMaterial.Create(protector, project!.Id);
+        project.IngestKeyHash = key.Hash;
+        project.IngestKeyEncrypted = key.Encrypted;
+        project.IngestKeyPrefix = key.Prefix;
+        project.IngestKeyCreatedAtUtc = now;
         AuditLog.Add(
             db,
-            userId,
+            CurrentUser.TryGetUserId(principal, out Guid userId) ? userId : null,
             AuditLog.IngestKeyRotate,
-            project.DeveloperId,
-            replaced ? $"replaced the ingest key; new key starts {project.IngestKeyPrefix}" : $"created ingest key {project.IngestKeyPrefix}");
+            project.Id.ToString(),
+            $"replaced the ingest key; new key starts {key.Prefix}");
         await db.SaveChangesAsync();
 
-        return Results.Ok(new IngestKeyResponse(IngestAccess.ConnectionString(config, key), project.IngestKeyPrefix!, now));
+        return Results.Ok(new IngestKeyResponse(IngestAccess.ConnectionString(config, key.Key), key.Prefix, now));
     }
 
-    /// <summary>Gives the project a fresh ingest key (hash, encrypted copy, prefix) and returns it.</summary>
-    private static string SetNewKey(Project project, IngestKeyProtector protector, DateTime now)
+    /// <summary>A fresh ingest key and everything the project row stores about it.</summary>
+    private readonly record struct IngestKeyMaterial(string Key, string Hash, string Encrypted, string Prefix)
     {
-        string key = IngestAccess.NewKey();
-        project.IngestKeyHash = IngestAccess.Hash(key);
-        project.IngestKeyEncrypted = protector.Protect(key, project.Id);
-        project.IngestKeyPrefix = IngestAccess.DisplayPrefix(key);
-        project.IngestKeyCreatedAtUtc = now;
-        return key;
-    }
-
-    private static async Task<string> GenerateUniqueDeveloperIdAsync(MoodyBluesDbContext db)
-    {
-        for (int attempt = 0; attempt < 10; attempt++)
+        public static IngestKeyMaterial Create(IngestKeyProtector protector, Guid projectId)
         {
-            string candidate = IdGenerator.NewToken();
-            bool exists = await db.Projects.AnyAsync(p => p.DeveloperId == candidate);
-            if (!exists)
-            {
-                return candidate;
-            }
+            string key = IngestAccess.NewKey();
+            return new IngestKeyMaterial(
+                key, Hashing.Sha256Hex(key), protector.Protect(key, projectId), IngestAccess.DisplayPrefix(key));
         }
-
-        throw new InvalidOperationException("Could not generate a unique developerId after 10 attempts.");
     }
 }

@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
@@ -37,19 +36,9 @@ public static class SceneCheckEndpoints
     /// <summary>Public so tests can call it directly against an in-memory database.</summary>
     public static async Task<IResult> HandleAsync(SceneCheckRequest request, HttpRequest httpRequest, MoodyBluesDbContext db, ServerConfig config)
     {
-        if (string.IsNullOrWhiteSpace(request.SceneId) || string.IsNullOrWhiteSpace(request.SceneHash))
+        if (IngestScenes.Validate(request.SceneId, request.SceneHash) is { } invalid)
         {
-            return Results.BadRequest("sceneId and sceneHash are both required.");
-        }
-
-        if (!PathSegments.IsSafe(request.SceneId))
-        {
-            return Results.BadRequest("sceneId may only contain letters, digits, '-' and '_'.");
-        }
-
-        if (!PathSegments.IsSceneHash(request.SceneHash))
-        {
-            return Results.BadRequest("sceneHash must be 64 lowercase hex characters.");
+            return invalid;
         }
 
         (IngestProject? project, IResult? denied) = await IngestAccess.ResolveAsync(db, httpRequest);
@@ -58,21 +47,12 @@ public static class SceneCheckEndpoints
             return denied;
         }
 
-        string developerId = project!.DeveloperId;
-        bool sceneUploadRequired = !await db.SceneRevisions.AnyAsync(r =>
-            r.DeveloperId == developerId && r.SceneId == request.SceneId && r.Hash == request.SceneHash);
-
-        string? sceneUploadUrl = sceneUploadRequired
-            ? BuildSceneUploadUrl(config, request.SceneId, request.SceneHash)
-            : null;
+        (bool sceneUploadRequired, string? sceneUploadUrl) =
+            await IngestScenes.CheckAsync(db, config, project!.ProjectId, request.SceneId, request.SceneHash);
 
         ConsoleLog.Info(
-            $"Scene check: developer={developerId} scene={request.SceneId} sceneUploadRequired={sceneUploadRequired}");
+            $"Scene check: project={project.ProjectId} scene={request.SceneId} sceneUploadRequired={sceneUploadRequired}");
 
         return Results.Ok(new SceneCheckResponse(sceneUploadRequired, sceneUploadUrl));
     }
-
-    /// <summary>The upload URL handed to the client, shared with the handshake. The project comes from the key.</summary>
-    public static string BuildSceneUploadUrl(ServerConfig config, string sceneId, string sceneHash) =>
-        $"{(config.IsHttps ? "https" : "http")}://{config.PublicHostAndPort()}/scenes/{sceneId}?sceneHash={sceneHash}";
 }

@@ -4,7 +4,5 @@ public sealed record RegisterRequest(string Email, string Password);
 
 public sealed record LoginRequest(string Email, string Password);
 
-/// <summary>Body of a successful sign-in or refresh. The tokens themselves are only in httpOnly cookies.</summary>
-public sealed record AuthResponse(Guid UserId, string Email);
-
-public sealed record MeResponse(Guid UserId, string Email);
+/// <summary>The signed-in user: the body of a sign-in, a refresh and <c>GET /auth/me</c>. The tokens themselves are only in httpOnly cookies.</summary>
+public sealed record UserResponse(Guid UserId, string Email);

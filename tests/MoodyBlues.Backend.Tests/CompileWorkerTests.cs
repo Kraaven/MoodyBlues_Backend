@@ -16,6 +16,7 @@ public class CompileWorkerTests : IDisposable
 {
     private static readonly string Hash = new('c', 64);
     private readonly string _root = Path.Combine(Path.GetTempPath(), "mb-worker-tests-" + Guid.NewGuid().ToString("N"));
+    private readonly Guid _p = Guid.NewGuid();
     private readonly ServerConfig _config;
     private readonly StoragePaths _paths;
     private readonly ServiceProvider _services;
@@ -53,13 +54,12 @@ public class CompileWorkerTests : IDisposable
     private async Task<Guid> SeedSessionAsync(SessionStatus status, DateTime lastActivity, bool writeLog = true)
     {
         using MoodyBluesDbContext db = Db();
-        await DeveloperProvisioning.EnsureExistsAsync(db, "dev1");
         var id = Guid.NewGuid();
-        string rawRelative = Path.Combine(StoragePaths.SessionDir("dev1", id), StoragePaths.RawLogFile);
+        string rawRelative = Path.Combine(StoragePaths.SessionDir(_p, id), StoragePaths.RawLogFile);
         db.Sessions.Add(new Session
         {
             Id = id,
-            DeveloperId = "dev1",
+            ProjectId = _p,
             SceneId = "scene1",
             SceneHash = Hash,
             ClientSessionId = id.ToString(),
@@ -75,8 +75,8 @@ public class CompileWorkerTests : IDisposable
         {
             using var writer = new RawLogWriter(_paths.SessionFull(rawRelative));
             writer.AppendConnectionOpened(0);
-            writer.Append(RawLogRecordKind.Message, new WireBuilder().BeginSession().Time(1).DeltaPosition(1, new Vector3(0.1f, 0, 0)).EndSession().Build());
-            writer.AppendConnectionClosed(RawLogCloseReason.ClientClosed);
+            writer.Append(RawLogRecordKind.Message, new WireBuilder().BeginSession().Time(1).KeepAlive().Time(3).DeltaPosition(1, new Vector3(0.1f, 0, 0)).EndSession(widenings: 7, promotions: 3).Build(), connection: 0);
+            writer.AppendConnectionClosed(RawLogCloseReason.ClientClosed, connection: 0);
         }
 
         return id;
@@ -85,9 +85,9 @@ public class CompileWorkerTests : IDisposable
     private async Task SeedRegistryAsync()
     {
         using MoodyBluesDbContext db = Db();
-        await IngestEndpointsTests.SeedRevisionAsync(db, "dev1", "scene1", Hash);
-        SceneRevision revision = (await db.SceneRevisions.FindAsync("dev1", "scene1", Hash))!;
-        string registryRelative = Path.Combine(StoragePaths.SceneRevisionDir("dev1", "scene1", Hash), StoragePaths.RegistryFile);
+        await IngestEndpointsTests.SeedRevisionAsync(db, _p, "scene1", Hash);
+        SceneRevision revision = (await db.SceneRevisions.FindAsync(_p, "scene1", Hash))!;
+        string registryRelative = Path.Combine(StoragePaths.SceneRevisionDir(_p, "scene1", Hash), StoragePaths.RegistryFile);
         await new SceneRegistry { Objects = [new SceneRegistryObject(1, 0, [0, 0, 0], [0, 0, 0, 1], [1, 1, 1], false, false, 1)] }
             .SaveAsync(_paths.SceneFull(registryRelative));
         revision.RegistryPath = registryRelative;
@@ -139,6 +139,25 @@ public class CompileWorkerTests : IDisposable
         Assert.True(File.Exists(_paths.SessionFull(session.ReplayPath!)));
         Assert.True(session.ReplaySizeBytes > 0);
         Assert.Equal(1, session.ObjectCount);
+    }
+
+    [Fact]
+    public async Task Compile_StoresTheClientCountersAndTheActivity()
+    {
+        Guid id = await SeedSessionAsync(SessionStatus.Queued, DateTime.UtcNow);
+        await SeedRegistryAsync();
+
+        Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
+
+        using MoodyBluesDbContext db = Db();
+        Session session = (await db.Sessions.FindAsync(id))!;
+        Assert.Equal(7, session.RotationWidenings);
+        Assert.Equal(3, session.DeltaPromotions);
+
+        SessionActivity? activity = SessionActivity.FromJson(session.ActivityJson);
+        Assert.NotNull(activity);
+        Assert.Equal(SessionActivity.BinCount, activity!.Bins.Count);
+        Assert.Contains(activity.Bins, b => b > 0);
     }
 
     [Fact]

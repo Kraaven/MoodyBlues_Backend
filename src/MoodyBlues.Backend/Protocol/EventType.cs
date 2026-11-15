@@ -45,7 +45,7 @@ public enum EventType : byte
     EndSession = 31,
     ReparentObject = 32,
 
-    // Developer log (Spec 6.7). No envelope; fixed 35 bytes.
+    // Developer log (Spec 6.7). No envelope; fixed 32 bytes.
     Log = 33,
 }
 

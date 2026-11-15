@@ -125,14 +125,14 @@ public sealed class CompileWorker(
         // Queued sessions whose scene version is missing wait outside the queue.
         List<Session> missingScene = await db.Sessions
             .Where(s => s.Status == SessionStatus.Queued &&
-                        !db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash))
+                        !db.SceneRevisions.Any(r => r.ProjectId == s.ProjectId && r.SceneId == s.SceneId && r.Hash == s.SceneHash))
             .Take(500)
             .ToListAsync(cancellationToken);
 
         // Queued sessions whose scene version was uploaded but cannot be read will never compile.
         List<Session> unusableScene = await db.Sessions
             .Where(s => s.Status == SessionStatus.Queued &&
-                        db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
+                        db.SceneRevisions.Any(r => r.ProjectId == s.ProjectId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
                                                    r.Status == SceneProcessingStatus.Failed && !r.RegistryReady))
             .Take(500)
             .ToListAsync(cancellationToken);
@@ -155,7 +155,7 @@ public sealed class CompileWorker(
 
         Session? next = await db.Sessions
             .Where(s => s.Status == SessionStatus.Queued &&
-                        db.SceneRevisions.Any(r => r.DeveloperId == s.DeveloperId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
+                        db.SceneRevisions.Any(r => r.ProjectId == s.ProjectId && r.SceneId == s.SceneId && r.Hash == s.SceneHash &&
                                                    r.RegistryReady && r.RegistryPath != null))
             .OrderBy(s => s.LastActivityUtc)
             .FirstOrDefaultAsync(cancellationToken);
@@ -165,7 +165,7 @@ public sealed class CompileWorker(
             return false;
         }
 
-        SceneRevision revision = (await db.SceneRevisions.FindAsync([next.DeveloperId, next.SceneId, next.SceneHash], cancellationToken))!;
+        SceneRevision revision = (await db.SceneRevisions.FindAsync([next.ProjectId, next.SceneId, next.SceneHash], cancellationToken))!;
         try
         {
             await CompileAsync(next, revision, db, cancellationToken);
@@ -174,7 +174,7 @@ public sealed class CompileWorker(
         {
             // The session (or its whole scene) was deleted while it compiled. Its replay file
             // was written into a directory the deletion already removed; remove it again.
-            SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(next.DeveloperId, next.Id)));
+            SceneDeletion.TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(next.ProjectId, next.Id)));
             ConsoleLog.Info($"Compile worker: session {next.Id} was deleted while compiling; discarded its output.");
         }
 
@@ -189,7 +189,7 @@ public sealed class CompileWorker(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(config.CompileTimeout);
 
-        string replayRelative = Path.Combine(StoragePaths.SessionDir(session.DeveloperId, session.Id), StoragePaths.ReplayFile);
+        string replayRelative = Path.Combine(StoragePaths.SessionDir(session.ProjectId, session.Id), StoragePaths.ReplayFile);
         try
         {
             SceneRegistry registry = await SceneRegistry.LoadAsync(paths.SceneFull(revision.RegistryPath!), timeout.Token);
@@ -205,11 +205,12 @@ public sealed class CompileWorker(
             session.DurationSeconds = replay.DurationSeconds;
             session.ObjectCount = replay.Objects.Count;
             session.SpawnCount = replay.SpawnCount;
-            session.RawEventCount = replay.RawEventCount;
             session.KeyframeCount = replay.KeyframeCount;
             session.DeltaPromotions = replay.DeltaPromotions;
             session.HardClamps = replay.HardClamps;
             session.DroppedEvents = replay.DroppedEvents;
+            session.RotationWidenings = replay.RotationWidenings;
+            session.ActivityJson = SessionActivity.Compute(replay).ToJson();
             session.InfoLogCount = replay.Logs.Count(l => l.Level == 1);
             session.WarningLogCount = replay.Logs.Count(l => l.Level == 2);
             session.ErrorLogCount = replay.Logs.Count(l => l.Level == 3);

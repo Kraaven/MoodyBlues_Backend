@@ -24,7 +24,7 @@ public static class SceneDeletion
         MoodyBluesDbContext db,
         StoragePaths paths,
         ActiveConnections connections,
-        string developerId,
+        Guid projectId,
         string sceneId,
         IReadOnlyCollection<SceneRevision> revisions,
         bool deleteScene,
@@ -36,7 +36,7 @@ public static class SceneDeletion
         // A deleted scene loses every session, including ones waiting for a version that was never
         // uploaded. Deleting single versions only removes the sessions recorded in those versions.
         List<Session> sessions = await db.Sessions
-            .Where(s => s.DeveloperId == developerId && s.SceneId == sceneId)
+            .Where(s => s.ProjectId == projectId && s.SceneId == sceneId)
             .ToListAsync();
         if (!deleteScene)
         {
@@ -59,7 +59,7 @@ public static class SceneDeletion
 
         db.Sessions.RemoveRange(sessions);
         db.SceneRevisions.RemoveRange(revisions);
-        if (deleteScene && await db.Scenes.FindAsync(developerId, sceneId) is { } scene)
+        if (deleteScene && await db.Scenes.FindAsync(projectId, sceneId) is { } scene)
         {
             db.Scenes.Remove(scene);
         }
@@ -67,7 +67,7 @@ public static class SceneDeletion
         if (auditAction is not null)
         {
             string versions = string.Join(", ", revisions.OrderBy(r => r.Version).Select(r => $"v{r.Version}"));
-            AuditLog.Add(db, userId, auditAction, $"{developerId}/{sceneId}",
+            AuditLog.Add(db, userId, auditAction, $"{projectId}/{sceneId}",
                 $"{revisions.Count} version(s) [{versions}], {sessions.Count} session(s), {bytes} bytes");
         }
 
@@ -77,21 +77,21 @@ public static class SceneDeletion
         // point at missing ones.
         foreach (Session s in sessions)
         {
-            TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(s.DeveloperId, s.Id)));
+            TryDeleteDirectory(paths.SessionFull(StoragePaths.SessionDir(s.ProjectId, s.Id)));
         }
 
         foreach (SceneRevision r in revisions)
         {
-            TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneRevisionDir(r.DeveloperId, r.SceneId, r.Hash)));
+            TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneRevisionDir(r.ProjectId, r.SceneId, r.Hash)));
         }
 
         if (deleteScene)
         {
-            TryDeleteDirectory(paths.SceneFull(Path.Combine(developerId, sceneId)));
+            TryDeleteDirectory(paths.SceneFull(StoragePaths.SceneDir(projectId, sceneId)));
         }
 
         ConsoleLog.Info(
-            $"Deleted {(deleteScene ? "scene" : "versions of")} {developerId}/{sceneId}: " +
+            $"Deleted {(deleteScene ? "scene" : "versions of")} {projectId}/{sceneId}: " +
             $"{revisions.Count} version(s), {sessions.Count} session(s), {bytes} bytes" +
             (live.Count > 0 ? $", {live.Count} live recording(s) closed." : "."));
 

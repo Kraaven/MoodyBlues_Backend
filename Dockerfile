@@ -56,6 +56,5 @@ EXPOSE 8765
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
     CMD curl -fsS http://localhost:8765/health || exit 1
 
-# The entrypoint starts as root only to hand volumes created by older images (owned by root) to
-# the `app` user, then runs the server as `app`. Nothing else runs as root.
+# The entrypoint drops to the `app` user when the container starts as root; nothing else runs as root.
 ENTRYPOINT ["docker-entrypoint.sh"]

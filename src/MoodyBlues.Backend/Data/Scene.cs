@@ -17,13 +17,13 @@ public enum SceneProcessingStatus
 }
 
 /// <summary>
-/// One developer's scene, identified by <c>(DeveloperId, SceneId)</c> where SceneId is Unity's
+/// One project's scene, identified by <c>(ProjectId, SceneId)</c> where SceneId is Unity's
 /// scene-asset GUID. The geometry lives in <see cref="SceneRevision"/> rows, one per scene hash,
 /// because a session must replay against the exact revision it was recorded in (Unity Spec 5.1).
 /// </summary>
 public sealed class Scene
 {
-    public required string DeveloperId { get; set; }
+    public required Guid ProjectId { get; set; }
 
     public required string SceneId { get; set; }
 
@@ -40,12 +40,12 @@ public sealed class Scene
 
 /// <summary>
 /// One immutable uploaded revision of a scene, keyed by its scene hash (Unity Spec 13.2). Files are
-/// stored under <c>{ScenesDir}/{developerId}/{sceneId}/{hash}/</c> and never overwritten, so old
+/// stored under <c>{ScenesDir}/{projectId:N}/{sceneId}/{hash}/</c> and never overwritten, so old
 /// sessions keep replaying against the geometry they were recorded with.
 /// </summary>
 public sealed class SceneRevision
 {
-    public required string DeveloperId { get; set; }
+    public required Guid ProjectId { get; set; }
 
     public required string SceneId { get; set; }
 

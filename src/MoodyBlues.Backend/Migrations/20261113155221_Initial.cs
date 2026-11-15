@@ -12,15 +12,19 @@ namespace MoodyBlues.Backend.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.CreateTable(
-                name: "Developers",
+                name: "AuditEvents",
                 columns: table => new
                 {
-                    Id = table.Column<string>(type: "text", nullable: false),
-                    CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    UserId = table.Column<Guid>(type: "uuid", nullable: true),
+                    Action = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
+                    Target = table.Column<string>(type: "character varying(512)", maxLength: 512, nullable: false),
+                    Detail = table.Column<string>(type: "character varying(2048)", maxLength: 2048, nullable: false)
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_Developers", x => x.Id);
+                    table.PrimaryKey("PK_AuditEvents", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -38,10 +42,58 @@ namespace MoodyBlues.Backend.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "Projects",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    UserId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Name = table.Column<string>(type: "text", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    IngestKeyHash = table.Column<string>(type: "text", nullable: false),
+                    IngestKeyEncrypted = table.Column<string>(type: "text", nullable: false),
+                    IngestKeyPrefix = table.Column<string>(type: "text", nullable: false),
+                    IngestKeyCreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Projects", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_Projects_Users_UserId",
+                        column: x => x.UserId,
+                        principalTable: "Users",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "RefreshTokens",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    UserId = table.Column<Guid>(type: "uuid", nullable: false),
+                    TokenHash = table.Column<string>(type: "text", nullable: false),
+                    FamilyId = table.Column<Guid>(type: "uuid", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    ExpiresAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    ReplacedByTokenId = table.Column<Guid>(type: "uuid", nullable: true),
+                    RevokedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_RefreshTokens", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_RefreshTokens_Users_UserId",
+                        column: x => x.UserId,
+                        principalTable: "Users",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "Scenes",
                 columns: table => new
                 {
-                    DeveloperId = table.Column<string>(type: "text", nullable: false),
+                    ProjectId = table.Column<Guid>(type: "uuid", nullable: false),
                     SceneId = table.Column<string>(type: "text", nullable: false),
                     LatestHash = table.Column<string>(type: "text", nullable: false),
                     DisplayName = table.Column<string>(type: "text", nullable: true),
@@ -50,11 +102,11 @@ namespace MoodyBlues.Backend.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_Scenes", x => new { x.DeveloperId, x.SceneId });
+                    table.PrimaryKey("PK_Scenes", x => new { x.ProjectId, x.SceneId });
                     table.ForeignKey(
-                        name: "FK_Scenes_Developers_DeveloperId",
-                        column: x => x.DeveloperId,
-                        principalTable: "Developers",
+                        name: "FK_Scenes_Projects_ProjectId",
+                        column: x => x.ProjectId,
+                        principalTable: "Projects",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -64,7 +116,7 @@ namespace MoodyBlues.Backend.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    DeveloperId = table.Column<string>(type: "text", nullable: false),
+                    ProjectId = table.Column<Guid>(type: "uuid", nullable: false),
                     SceneId = table.Column<string>(type: "text", nullable: false),
                     SceneHash = table.Column<string>(type: "text", nullable: false),
                     ClientSessionId = table.Column<string>(type: "text", nullable: false),
@@ -81,11 +133,15 @@ namespace MoodyBlues.Backend.Migrations
                     DurationSeconds = table.Column<double>(type: "double precision", nullable: false),
                     ObjectCount = table.Column<int>(type: "integer", nullable: false),
                     SpawnCount = table.Column<int>(type: "integer", nullable: false),
-                    RawEventCount = table.Column<long>(type: "bigint", nullable: false),
                     KeyframeCount = table.Column<long>(type: "bigint", nullable: false),
                     DeltaPromotions = table.Column<long>(type: "bigint", nullable: false),
                     HardClamps = table.Column<long>(type: "bigint", nullable: false),
                     DroppedEvents = table.Column<long>(type: "bigint", nullable: false),
+                    RotationWidenings = table.Column<long>(type: "bigint", nullable: false),
+                    InfoLogCount = table.Column<int>(type: "integer", nullable: false),
+                    WarningLogCount = table.Column<int>(type: "integer", nullable: false),
+                    ErrorLogCount = table.Column<int>(type: "integer", nullable: false),
+                    ActivityJson = table.Column<string>(type: "jsonb", nullable: true),
                     CompilerVersion = table.Column<int>(type: "integer", nullable: false),
                     CompiledAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
                     ErrorMessage = table.Column<string>(type: "text", nullable: true)
@@ -94,30 +150,9 @@ namespace MoodyBlues.Backend.Migrations
                 {
                     table.PrimaryKey("PK_Sessions", x => x.Id);
                     table.ForeignKey(
-                        name: "FK_Sessions_Developers_DeveloperId",
-                        column: x => x.DeveloperId,
-                        principalTable: "Developers",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "Projects",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    UserId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Name = table.Column<string>(type: "text", nullable: false),
-                    DeveloperId = table.Column<string>(type: "text", nullable: false),
-                    CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_Projects", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_Projects_Users_UserId",
-                        column: x => x.UserId,
-                        principalTable: "Users",
+                        name: "FK_Sessions_Projects_ProjectId",
+                        column: x => x.ProjectId,
+                        principalTable: "Projects",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -126,9 +161,11 @@ namespace MoodyBlues.Backend.Migrations
                 name: "SceneRevisions",
                 columns: table => new
                 {
-                    DeveloperId = table.Column<string>(type: "text", nullable: false),
+                    ProjectId = table.Column<Guid>(type: "uuid", nullable: false),
                     SceneId = table.Column<string>(type: "text", nullable: false),
                     Hash = table.Column<string>(type: "text", nullable: false),
+                    Version = table.Column<int>(type: "integer", nullable: false),
+                    SkippedMeshCount = table.Column<int>(type: "integer", nullable: false),
                     RawGlbPath = table.Column<string>(type: "text", nullable: false),
                     RawSizeBytes = table.Column<long>(type: "bigint", nullable: false),
                     OptimizedGlbPath = table.Column<string>(type: "text", nullable: true),
@@ -142,19 +179,24 @@ namespace MoodyBlues.Backend.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_SceneRevisions", x => new { x.DeveloperId, x.SceneId, x.Hash });
+                    table.PrimaryKey("PK_SceneRevisions", x => new { x.ProjectId, x.SceneId, x.Hash });
                     table.ForeignKey(
-                        name: "FK_SceneRevisions_Scenes_DeveloperId_SceneId",
-                        columns: x => new { x.DeveloperId, x.SceneId },
+                        name: "FK_SceneRevisions_Scenes_ProjectId_SceneId",
+                        columns: x => new { x.ProjectId, x.SceneId },
                         principalTable: "Scenes",
-                        principalColumns: new[] { "DeveloperId", "SceneId" },
+                        principalColumns: new[] { "ProjectId", "SceneId" },
                         onDelete: ReferentialAction.Cascade);
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_Projects_DeveloperId",
+                name: "IX_AuditEvents_AtUtc",
+                table: "AuditEvents",
+                column: "AtUtc");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Projects_IngestKeyHash",
                 table: "Projects",
-                column: "DeveloperId",
+                column: "IngestKeyHash",
                 unique: true);
 
             migrationBuilder.CreateIndex(
@@ -163,20 +205,42 @@ namespace MoodyBlues.Backend.Migrations
                 column: "UserId");
 
             migrationBuilder.CreateIndex(
+                name: "IX_RefreshTokens_FamilyId",
+                table: "RefreshTokens",
+                column: "FamilyId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RefreshTokens_TokenHash",
+                table: "RefreshTokens",
+                column: "TokenHash",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RefreshTokens_UserId",
+                table: "RefreshTokens",
+                column: "UserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_SceneRevisions_ProjectId_SceneId_Version",
+                table: "SceneRevisions",
+                columns: new[] { "ProjectId", "SceneId", "Version" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
                 name: "IX_SceneRevisions_Status",
                 table: "SceneRevisions",
                 column: "Status");
 
             migrationBuilder.CreateIndex(
-                name: "IX_Sessions_DeveloperId_ClientSessionId",
+                name: "IX_Sessions_ProjectId_ClientSessionId",
                 table: "Sessions",
-                columns: new[] { "DeveloperId", "ClientSessionId" },
+                columns: new[] { "ProjectId", "ClientSessionId" },
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_Sessions_DeveloperId_SceneId",
+                name: "IX_Sessions_ProjectId_SceneId",
                 table: "Sessions",
-                columns: new[] { "DeveloperId", "SceneId" });
+                columns: new[] { "ProjectId", "SceneId" });
 
             migrationBuilder.CreateIndex(
                 name: "IX_Sessions_Status",
@@ -200,7 +264,10 @@ namespace MoodyBlues.Backend.Migrations
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropTable(
-                name: "Projects");
+                name: "AuditEvents");
+
+            migrationBuilder.DropTable(
+                name: "RefreshTokens");
 
             migrationBuilder.DropTable(
                 name: "SceneRevisions");
@@ -209,13 +276,13 @@ namespace MoodyBlues.Backend.Migrations
                 name: "Sessions");
 
             migrationBuilder.DropTable(
-                name: "Users");
-
-            migrationBuilder.DropTable(
                 name: "Scenes");
 
             migrationBuilder.DropTable(
-                name: "Developers");
+                name: "Projects");
+
+            migrationBuilder.DropTable(
+                name: "Users");
         }
     }
 }

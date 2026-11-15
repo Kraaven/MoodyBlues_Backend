@@ -43,7 +43,7 @@ public sealed class AuditEvent
     /// <summary>For example <c>scene.delete</c>, <c>scene.version.delete</c>, <c>session.delete</c>, <c>project.ingestKey.rotate</c>.</summary>
     public required string Action { get; set; }
 
-    /// <summary>What it was done to, for example <c>{developerId}/{sceneId}</c> or a session id.</summary>
+    /// <summary>What it was done to, for example <c>{projectId}/{sceneId}</c> or a session id.</summary>
     public required string Target { get; set; }
 
     /// <summary>A human-readable summary: counts, sizes, version numbers.</summary>

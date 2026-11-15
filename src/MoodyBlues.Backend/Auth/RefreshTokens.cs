@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
+using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Ingest;
 using MoodyBlues.Backend.Logging;
 
@@ -29,7 +30,7 @@ public static class RefreshTokens
         {
             Id = Guid.NewGuid(),
             UserId = userId,
-            TokenHash = StreamTokens.Hash(raw),
+            TokenHash = Hashing.Sha256Hex(raw),
             FamilyId = familyId ?? Guid.NewGuid(),
             CreatedAtUtc = now,
             ExpiresAtUtc = now.Add(config.RefreshTokenLifetime),
@@ -48,7 +49,7 @@ public static class RefreshTokens
     {
         if (string.IsNullOrEmpty(raw) || raw.Length > 128) return null;
 
-        string hash = StreamTokens.Hash(raw);
+        string hash = Hashing.Sha256Hex(raw);
         RefreshToken? token = await db.RefreshTokens.FirstOrDefaultAsync(t => t.TokenHash == hash);
         DateTime now = DateTime.UtcNow;
         if (token is null || token.ExpiresAtUtc <= now) return null;
@@ -82,7 +83,7 @@ public static class RefreshTokens
     public static async Task RevokeAsync(MoodyBluesDbContext db, string? raw)
     {
         if (string.IsNullOrEmpty(raw) || raw.Length > 128) return;
-        string hash = StreamTokens.Hash(raw);
+        string hash = Hashing.Sha256Hex(raw);
         RefreshToken? token = await db.RefreshTokens.FirstOrDefaultAsync(t => t.TokenHash == hash);
         if (token is not null) await RevokeFamilyAsync(db, token.FamilyId, DateTime.UtcNow);
     }

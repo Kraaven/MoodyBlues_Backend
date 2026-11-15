@@ -72,20 +72,18 @@ public interface IWireEventSink
     void OnLog(byte style, ReadOnlySpan<byte> utf8Text);
 }
 
-/// <summary>A sink that ignores everything; used when only validation is needed.</summary>
-public sealed class NullWireEventSink : IWireEventSink
+/// <summary>A sink that ignores everything; derive from it and override only the events you care about.</summary>
+public abstract class WireEventSinkBase : IWireEventSink
 {
-    public static readonly NullWireEventSink Instance = new();
-
-    public void OnTimeStamp(double seconds) { }
-    public void OnBeginSession(in BeginSessionInfo info) { }
-    public void OnKeepAlive() { }
-    public void OnEndSession(in EndSessionInfo info) { }
-    public void OnShow(ushort objectId) { }
-    public void OnHide(ushort objectId) { }
-    public void OnDelete(ushort objectId) { }
-    public void OnInstantiate(ushort objectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
-    public void OnReparent(ushort objectId, ushort newParentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
-    public void OnTransform(ushort objectId, in TransformUpdate update) { }
-    public void OnLog(byte style, ReadOnlySpan<byte> utf8Text) { }
+    public virtual void OnTimeStamp(double seconds) { }
+    public virtual void OnBeginSession(in BeginSessionInfo info) { }
+    public virtual void OnKeepAlive() { }
+    public virtual void OnEndSession(in EndSessionInfo info) { }
+    public virtual void OnShow(ushort objectId) { }
+    public virtual void OnHide(ushort objectId) { }
+    public virtual void OnDelete(ushort objectId) { }
+    public virtual void OnInstantiate(ushort objectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
+    public virtual void OnReparent(ushort objectId, ushort newParentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) { }
+    public virtual void OnTransform(ushort objectId, in TransformUpdate update) { }
+    public virtual void OnLog(byte style, ReadOnlySpan<byte> utf8Text) { }
 }

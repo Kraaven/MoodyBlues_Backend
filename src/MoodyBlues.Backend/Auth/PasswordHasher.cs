@@ -4,9 +4,7 @@ namespace MoodyBlues.Backend.Auth;
 
 /// <summary>
 /// PBKDF2-HMAC-SHA256 password hashing, dependency-free. The encoded format is
-/// <c>{iterations}.{saltBase64}.{hashBase64}</c>, so the iteration count travels with the hash:
-/// hashes made with fewer than <see cref="Iterations"/> still verify, and
-/// <see cref="NeedsRehash"/> tells the login to replace them (security plan phase 3).
+/// <c>{iterations}.{saltBase64}.{hashBase64}</c>, so the iteration count travels with the hash.
 /// </summary>
 public static class PasswordHasher
 {
@@ -54,8 +52,4 @@ public static class PasswordHasher
 
     /// <summary>Spends the same time as verifying a real password, for an account that does not exist.</summary>
     public static void VerifyDummy(string password) => Verify(password, DummyHash);
-
-    /// <summary>True when a stored hash uses fewer iterations than new hashes do.</summary>
-    public static bool NeedsRehash(string encodedHash) =>
-        !int.TryParse(encodedHash.Split('.')[0], out int iterations) || iterations < Iterations;
 }

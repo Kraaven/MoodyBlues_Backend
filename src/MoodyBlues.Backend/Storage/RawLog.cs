@@ -66,7 +66,6 @@ public sealed class RawLogWriter : IDisposable
     private readonly FileStream _stream;
     private readonly object _sync = new();
     private readonly byte[] _header = new byte[RawLogFormat.RecordHeaderSize];
-    private uint _lastOpenedConnection;
 
     internal int RefCount;
 
@@ -111,10 +110,6 @@ public sealed class RawLogWriter : IDisposable
         }
     }
 
-    /// <summary>Appends a record for the most recently opened connection.</summary>
-    public void Append(RawLogRecordKind kind, ReadOnlySpan<byte> payload) =>
-        Append(kind, payload, _lastOpenedConnection);
-
     public void Append(RawLogRecordKind kind, ReadOnlySpan<byte> payload, uint connection)
     {
         lock (_sync)
@@ -139,14 +134,9 @@ public sealed class RawLogWriter : IDisposable
         BinaryPrimitives.WriteUInt32LittleEndian(payload, connectionIndex);
         lock (_sync)
         {
-            _lastOpenedConnection = connectionIndex;
             Append(RawLogRecordKind.ConnectionOpened, payload, connectionIndex);
         }
     }
-
-    /// <summary>Closes the most recently opened connection.</summary>
-    public void AppendConnectionClosed(RawLogCloseReason reason) =>
-        AppendConnectionClosed(reason, _lastOpenedConnection);
 
     public void AppendConnectionClosed(RawLogCloseReason reason, uint connection)
     {

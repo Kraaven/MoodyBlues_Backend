@@ -40,15 +40,22 @@ chmod +x deploy.sh
 ./deploy.sh start     # (default) build if needed and start
 ./deploy.sh stop      # stop; data is kept
 ./deploy.sh restart   # stop, then start
-./deploy.sh reset     # stop, git pull, rebuild, start: the update command
+./deploy.sh reset     # stop, git pull, rebuild, start: the update command; keeps all data
 ./deploy.sh logs      # follow both containers' logs
 ./deploy.sh status    # container status
 ./deploy.sh backup    # database dump + scene/session files into ./backups/<timestamp>/
+./deploy.sh wipe      # DELETES ALL DATA and starts an empty stack (asks for confirmation)
 ```
 
 All state lives in Docker named volumes (`moodyblues-db-data`, `moodyblues-scenes`,
-`moodyblues-sessions`), so `reset` and `restart` never lose data. Database migrations run
+`moodyblues-sessions`), so `stop`, `restart` and `reset` never lose data. Database migrations run
 automatically at startup. Volumes do not survive the disk they are on; see "Backup and restore".
+
+**`wipe`** prints what it will delete (the database, every stored scene file, every session and
+replay file), then asks you to type `wipe`; any other answer aborts with nothing deleted.
+`./deploy.sh wipe --yes` skips the question, for scripts. It then runs `docker compose down -v`
+(removing the three volumes above) and `docker compose up -d --build`, and the backend creates
+the empty schema at startup. Run `backup` first if there is anything to keep.
 
 Create a `.env` file next to `docker-compose.yml`:
 
@@ -67,7 +74,7 @@ is refused too.
 
 Postgres sets its password only when its volume is first created. If you change
 `MOODYBLUES_DB_PASSWORD` later, the backend can no longer log in. Either change the password
-inside Postgres too, or start over with `docker compose down -v`, which **deletes all data**.
+inside Postgres too, or start over with `./deploy.sh wipe`, which **deletes all data**.
 
 The Dockerfile's Node.js / `gltf-transform` / `toktx` layer takes several minutes on a cold build.
 Docker caches it, so later builds are fast unless that block changes.
@@ -75,8 +82,9 @@ Docker caches it, so later builds are fast unless that block changes.
 ### Container security
 
 - The server runs as the non-root `app` user from the .NET base image.
-- The entrypoint (`docker-entrypoint.sh`) starts as root only to hand files in `/app/data` that
-  older images created as root over to `app`, then drops root before the server starts.
+- The image creates `/app/data` owned by `app`, so fresh volumes are writable as they are. The
+  entrypoint (`docker-entrypoint.sh`) runs the server directly, and if the container is started
+  as root it drops to `app` first.
 - `docker-compose.yml` limits the backend's memory, CPUs and process count. Override them with
   `MOODYBLUES_MEMORY_LIMIT` (default `4g`) and `MOODYBLUES_CPU_LIMIT` (default `2`) in `.env`.
 - Docker's container logs rotate at 20 MB × 5 files per container.
@@ -99,8 +107,8 @@ terminate TLS itself. It joins an external Docker network named `proxy` as
 4. Point DNS at the server. Proxying through Cloudflare is fine.
 
 `docker-compose.yml` sets `MOODYBLUES_PUBLIC_SCHEME=https` and `MOODYBLUES_PUBLIC_PORT=443`, so
-the handshake hands clients `wss://` and `https://` URLs. Each scene config's `backendBaseUrl` in
-Unity must be `https://your-domain.example.com`.
+the handshake hands clients `wss://` and `https://` URLs. The connection string pasted into Unity
+(see "Who can send data") then has the form `https://mbk_...@your-domain.example.com`.
 
 **Cloudflare and idle connections.** Cloudflare resets a WebSocket whose server side stays
 silent for about a minute, even while the game is streaming to it. The server therefore sends a
@@ -119,8 +127,8 @@ Start a Postgres with a `moodyblues` role and database (`docker compose up -d db
 dotnet run --project src/MoodyBlues.Backend
 ```
 
-It listens on `http://localhost:8765`. The Unity Editor allows plain HTTP, so a scene config can
-point at it directly.
+It listens on `http://localhost:8765`. The Unity Editor allows plain HTTP, so a connection string
+with `http://` can point at it directly.
 
 ### Configuration
 
@@ -155,10 +163,10 @@ Everything is optional except where a deployment needs it (see `.env` above).
 |---|---|---|
 | `MOODYBLUES_MAX_SCENE_UPLOAD_MB` | `512` | One scene upload, measured after decompression |
 | `MOODYBLUES_MAX_REVISIONS_PER_SCENE` | `200` | Stored versions per scene, current and archived |
-| `MOODYBLUES_MAX_CONCURRENT_SESSIONS` | `50` | Recordings in progress per project |
+| `MOODYBLUES_MAX_CONCURRENT_SESSIONS` | `50` | Recordings in progress per project (`MaxConcurrentSessionsPerProject`) |
 | `MOODYBLUES_MAX_SESSION_MB` | `512` | Raw log size of one recording; the stream is closed when it is reached |
 | `MOODYBLUES_MAX_SESSION_MINUTES` | `360` | Length of one recording, from its handshake |
-| `MOODYBLUES_MAX_STORAGE_GB` | `20` | All scene and session files of one project |
+| `MOODYBLUES_MAX_STORAGE_GB` | `20` | All scene and session files of one project (`MaxStoragePerProjectBytes`) |
 
 ---
 
@@ -168,7 +176,7 @@ Everything is optional except where a deployment needs it (see `.env` above).
    session in **Recording** and returns a WebSocket URL and a secret stream token.
 2. **Scene check and upload.**
    - `POST /scenes/check` (or the handshake) says whether this scene version (its hash) is stored.
-   - If not, the Unity editor (at build time or from the Tools menu) or the game uploads it to
+   - If not, the Unity editor (at build time or from the MoodyBlues menu) or the game uploads it to
      `POST /scenes/{sceneId}`.
    - Each new hash becomes a new numbered **version** of the scene.
 3. **Streaming.** The game streams to `/stream`. Every valid message is appended to the session's
@@ -185,9 +193,8 @@ Everything is optional except where a deployment needs it (see `.env` above).
 Session statuses: `Recording`, `Queued`, `Compiling`, `Ready`, `Failed`, `WaitingForScene`.
 
 **Who can send data.** Every Unity-facing HTTP call carries the project's **ingest key** in
-`X-MoodyBlues-Ingest-Key`, and the key alone says which project the data is for. Unity never
-sends the developer ID, which is now internal: it still keys scenes, sessions, storage paths and
-dashboard routes.
+`X-MoodyBlues-Ingest-Key`, and the key alone says which project the data is for. Everything is
+keyed by the project's ID (a GUID): scenes, sessions, storage paths and dashboard routes.
 
 - The user copies one **connection string** from the project page, `https://mbk_<key>@<public
   host>`, built from `MOODYBLUES_PUBLIC_SCHEME`, `MOODYBLUES_PUBLIC_HOST` and
@@ -196,15 +203,12 @@ dashboard routes.
   (unique index, used for the lookup) and an AES-256-GCM encrypted copy (`IngestKeyEncrypted`), so
   the dashboard can show the connection string at any time. The encryption key is derived from
   `MOODYBLUES_JWT_SECRET`. Changing that secret leaves every key working, but the dashboard can no
-  longer show them; it asks the owner to rotate.
+  longer decrypt them: `connectionString` comes back null and the owner has to rotate.
 - `POST /api/projects/{id}/ingest-key` replaces the key; the old one stops working at once.
   Rotation is in the audit log.
 - It allows uploads only; no dashboard route accepts it. It ships inside game builds, so treat
   it as extractable. The quotas above limit what a leaked key can cost, and rotating it shuts the
   leak.
-- Projects whose key was issued before the encrypted copy existed keep working, but show no
-  connection string until rotated. A project with no key refuses all uploads until one is
-  created on its page.
 
 ## Unity-facing API
 
@@ -251,8 +255,9 @@ Same validation and rate limit as the handshake. It doesn't create a session.
   nothing.
 - **A new hash becomes the scene's current version,** and the previous ones are archived. Its
   waiting sessions are queued.
-- **Storage:** each upload writes its own file under `{ScenesDir}/{developerId}/{sceneId}/{hash}/`,
-  so concurrent uploads of the same hash can't replace each other's file.
+- **Storage:** each upload writes its own file under `{ScenesDir}/{projectId:N}/{sceneId}/{hash}/`
+  (`N` is the GUID without dashes), so concurrent uploads of the same hash can't replace each
+  other's file.
 - **Errors:** 401/404 as above, 400 not a GLB, 413 too large, 507 version or storage quota
   reached.
 
@@ -299,8 +304,7 @@ names, for example `"Ready"`.
   cookies and need `None` (the https default). Safari, and Firefox in strict mode, block
   third-party cookies, so there sign-in will not stick. Host the dashboard on a subdomain of the
   API's site to avoid that.
-- **Passwords.** PBKDF2-SHA256 with 600,000 iterations. Older hashes are upgraded the next time
-  their owner signs in.
+- **Passwords.** PBKDF2-SHA256 with 600,000 iterations.
 - **No account probing.** A failed sign-in always says "Wrong email or password." and takes as
   long as a real check. Registering a taken email returns the same generic 400 as any other
   refused registration. A successful registration still shows the address was free; closing
@@ -313,23 +317,57 @@ names, for example `"Ready"`.
 | Route | Purpose |
 |---|---|
 | `POST /auth/register`, `POST /auth/login` | Create an account / sign in; sets the cookies and returns `{ userId, email }` |
-| `POST /auth/refresh` | New cookie pair from `mb_refresh`; 401 if it is missing, expired or revoked |
+| `POST /auth/refresh` | New cookie pair from `mb_refresh`; 401 if it is missing, expired or revoked. Returns `{ userId, email }` |
 | `POST /auth/logout` | Revokes the refresh token and clears both cookies (204) |
-| `GET /auth/me` | The signed-in user |
-| `GET /api/projects`, `POST /api/projects` | List / create projects. Creating one issues its (internal) developer ID and its first ingest key. Both carry `ingestKeyPrefix` and `ingestKeyCreatedAtUtc` |
-| `POST /api/projects/{id}/ingest-key` | Replace the ingest key: `{ connectionString, ingestKeyPrefix, ingestKeyCreatedAtUtc }`. The old key stops working |
-| `GET /api/projects/{id}` | A project and its scenes (each with its current version number), and `connectionString` for Unity (null if the project has no key, or its key predates stored keys) |
-| `GET /api/scenes/{dev}/{scene}` | The scene: current version, archived versions (newest first, with session counts and sizes), and the number of sessions waiting for an un-uploaded version |
-| `PATCH /api/scenes/{dev}/{scene}` | Rename (`{ "displayName": "..." }`) |
-| `DELETE /api/scenes/{dev}/{scene}` | Delete the scene: closes its live recordings, then removes every version, session and file |
-| `DELETE /api/scenes/{dev}/{scene}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene) |
-| `DELETE /api/scenes/{dev}/{scene}/archive` | Delete every archived version and their sessions |
-| `GET /api/scenes/{dev}/{scene}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
-| `GET /api/scenes/{dev}/{scene}/sessions` | Sessions, newest first, each with its scene version (null while not uploaded), error message and per-level log counts (`infoLogCount`, `warningLogCount`, `errorLogCount`, set when the session compiles). `?version=n` filters to one version; `?awaitingScene=true` to sessions waiting for their scene |
-| `GET /api/sessions/{id}` | Session details, recording health counters and log counts |
-| `GET /api/sessions/{id}/replay` | The compiled replay file (gzip-encoded) |
-| `POST /api/sessions/{id}/recompile` | Rebuild the replay from the raw log |
-| `DELETE /api/sessions/{id}` | Delete one session (not while recording or compiling) |
+| `GET /auth/me` | The signed-in user: `{ userId, email }` |
+| `GET /api/projects`, `POST /api/projects` | List / create projects. Creating one issues its first ingest key. Both carry `ingestKeyPrefix` and `ingestKeyCreatedAtUtc` |
+| `POST /api/projects/{projectId}/ingest-key` | Replace the ingest key: `{ connectionString, ingestKeyPrefix, ingestKeyCreatedAtUtc }`. The old key stops working |
+| `GET /api/projects/{projectId}` | A project and its scenes (each with its current version number), and `connectionString` for Unity (null only when the stored key cannot be decrypted; rotate to get a new one) |
+| `GET /api/projects/{projectId}/scenes/{sceneId}` | The scene: `projectId`, current version, archived versions (newest first, with session counts and sizes), and the number of sessions waiting for an un-uploaded version |
+| `PATCH /api/projects/{projectId}/scenes/{sceneId}` | Rename (`{ "displayName": "..." }`) |
+| `DELETE /api/projects/{projectId}/scenes/{sceneId}` | Delete the scene: closes its live recordings, then removes every version, session and file |
+| `DELETE /api/projects/{projectId}/scenes/{sceneId}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene: 409) |
+| `DELETE /api/projects/{projectId}/scenes/{sceneId}/archive` | Delete every archived version and their sessions |
+| `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
+| `GET /api/projects/{projectId}/scenes/{sceneId}/sessions` | Sessions, newest first. `?version=n` filters to one version (404 if it does not exist); `?awaitingScene=true` to sessions waiting for their scene |
+| `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts |
+| `GET /api/sessions/{sessionId}/replay` | The compiled replay file (gzip-encoded) |
+| `POST /api/sessions/{sessionId}/recompile` | Rebuild the replay from the raw log |
+| `DELETE /api/sessions/{sessionId}` | Delete one session (not while recording or compiling) |
+
+`GET /health` (no sign-in) returns `{ "status": "ok" }` when the database answers, 503 otherwise.
+
+**Session responses.** The list and the detail share these fields: `status`, `endedCleanly`,
+`durationSeconds`, `objectCount`, `spawnCount`, `keyframeCount`, `replaySizeBytes`,
+`rawLogSizeBytes`, the scene version (`sceneVersion`, null while that version has not been
+uploaded), `errorMessage`, per-level log counts (`infoLogCount`, `warningLogCount`,
+`errorLogCount`, set when the session compiles) and `activity`. The detail adds `projectId`,
+`lastActivityUtc`, `connectionCount`, `compilerVersion`, `compiledAtUtc` and the counters the
+client reports in `EndSession`: `deltaPromotions`, `rotationWidenings`, `hardClamps`,
+`droppedEvents`.
+
+**`activity`** is the session's glyph, computed by the compiler (`Compiler/SessionActivity.cs`,
+`SessionCompiler.Version` 3) and stored as JSON on the session. It is null until the session is
+Ready. Every position is a fraction of the session's duration, 0 to 1, rounded to 4 decimals:
+
+```json
+{
+  "bins":     [0.0, 0.31, "... 48 numbers"],
+  "errors":   [0.12, 0.5],
+  "warnings": [0.3],
+  "spawns":   [0.01, 0.02],
+  "gaps":     [[0.4, 0.45], [0.7, 0.706]]
+}
+```
+
+- `bins`: keyframe activity in 48 equal time buckets, `sqrt(count / maxCount)`, so 0 to 1. A
+  keyframe is a fitted key time of a position, rotation or scale track, which is what the replay
+  file contains.
+- `errors`, `warnings`, `spawns`: where the Error logs, Warning logs and Spawn events fall.
+- `gaps`: `[start, end]` spans with no data: a data gap (given a width of 0.006 so it is visible),
+  or a disconnect until the next reconnect. A disconnect within 0.05 of the end is the normal
+  end, not a gap.
+- A session with no duration has 48 zero bins and empty lists.
 
 Delete endpoints return `{ "deletedVersions", "deletedSessions", "freedBytes" }`.
 
@@ -348,7 +386,7 @@ docker compose exec db psql -U moodyblues -d moodyblues \
 
 `./deploy.sh backup` writes `backups/<UTC timestamp>/` next to the repo:
 
-- `db.dump`: `pg_dump --format=custom` of the database (accounts, projects, sessions, audit log);
+- `db.dump`: `pg_dump --format=custom` of the database (accounts, projects, scenes, sessions, audit log);
 - `files.tar.gz`: the `scenes` and `sessions` volumes (uploaded GLBs, raw logs, replays).
 
 The stack keeps running. The database is dumped first, so a recording that writes files during
@@ -374,44 +412,68 @@ docker compose exec -T db pg_restore -U moodyblues -d moodyblues --clean --if-ex
 
 BACKEND=$(docker compose ps -aq backend)
 docker run --rm --volumes-from "$BACKEND" -v "$PWD/$B":/backup alpine \
-  sh -c 'rm -rf /app/data/scenes/* /app/data/sessions/* && tar xzf /backup/files.tar.gz -C /app/data'
+  sh -c 'rm -rf /app/data/scenes/* /app/data/sessions/* && tar xzf /backup/files.tar.gz -C /app/data && chown -R 1654:1654 /app/data'
 
-docker compose start backend                      # migrations bring an older dump up to date
+docker compose start backend                      # migrations apply any newer ones
 ```
 
-The restored files belong to root; the entrypoint hands them back to the `app` user when the
-backend starts. On a new machine, run `./deploy.sh` once first (with the same `.env`) so the
-volumes and containers exist, then restore. Keep `.env` with the backups: without
+The `chown` hands the restored files to the `app` user, which the server runs as (UID 1654 in the
+.NET base image; check with `docker compose run --rm --no-deps --entrypoint id backend app`).
+Nothing fixes ownership at startup, so without it the backend cannot write to restored files.
+On a new machine, run `./deploy.sh` once first (with the same `.env`) so the volumes and
+containers exist, then restore. Keep `.env` with the backups: without
 `MOODYBLUES_DB_PASSWORD` the database cannot be opened, and a different `MOODYBLUES_JWT_SECRET`
 only signs everyone out.
 
 ## Storage formats
 
+Paths in the database are relative to `MOODYBLUES_SCENES_DIR` / `MOODYBLUES_SESSIONS_DIR`, and
+everything is keyed by the project's ID (`{projectId:N}` is the GUID without dashes):
+
+```
+{ScenesDir}/{projectId:N}/{sceneId}/{hash}/      one scene version: the uploaded GLB,
+                                                 registry.json, optimized.glb
+{SessionsDir}/{projectId:N}/{sessionId:N}/       one session: raw.mblog, replay.mbr.gz
+```
+
 - **Raw log** (`raw.mblog`): the 8-byte magic `MBRAWv02`, then records
-  `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`. No older format is read:
-  a session with an older log fails to compile.
+  `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`. It is the only format
+  read.
 - **Replay file** (`replay.mbr.gz`): format 2, documented in `Compiler/ReplayFileWriter.cs`.
   - Object kinds are 0 scene, 1 spawned, and 2 spawned part: a child of a spawned object that the
     viewer animates inside the clone.
-  - `SessionCompiler.Version` is stored on each session; recompile older sessions to update them.
+  - The header does not carry the session's activity or counters; those are columns on the
+    session row.
+  - `SessionCompiler.Version` (now 3) is stored on each session as `compilerVersion`; recompile
+    older sessions to update them.
+- **Database:** one `Initial` EF Core migration, applied at startup. Dumps from before it was
+  squashed do not restore onto it; use `./deploy.sh wipe` for a clean start.
 
 ## Project layout
 
 ```
 src/MoodyBlues.Backend/
-  Program.cs                 host setup, DI, middleware, endpoint mapping
+  Program.cs                 host setup, DI, middleware, /health, endpoint mapping
   Config/ServerConfig.cs     every setting and quota, from MOODYBLUES_* environment variables
-  Common/                    PathSegments (ID validation), RateLimits, IdGenerator, WorkSignal
-  Data/                      EF Core entities and context, IngestAccess (key lookup, connection string), IngestKeyProtector, StorageQuota, DeveloperProvisioning
-  Migrations/                EF Core migrations (applied at startup)
-  Auth/                      registration, login, refresh tokens, cookies and CSRF check, JWT, password hashing
-  Common/SecurityHeaders.cs  response security headers
-  Projects/                  /api/projects
-  Ingest/                    /connection, /handshake, /scenes/check, /stream, open-connection tracking, stream tokens
-  Scenes/                    scene upload, dashboard scene routes, versions and deletion, object registry
+  Common/                    Hashing (Sha256Hex), PathSegments (ID validation), RateLimits,
+                             SecurityHeaders (response headers), WorkSignal
+  Data/                      EF Core entities and context (User, Project, Scene, SceneRevision,
+                             Session, refresh tokens, audit events), IngestAccess (key lookup,
+                             connection string), IngestKeyProtector, StorageQuota, AuditLog
+  Migrations/                the Initial EF Core migration (applied at startup)
+  Auth/                      registration, login, refresh tokens, cookies and CSRF check, JWT,
+                             password hashing
+  Projects/                  /api/projects; ProjectAccess (the "project owned by the caller,
+                             else 404" check shared by project, scene and session routes)
+  Ingest/                    /connection, /handshake, /scenes/check, /stream; IngestScenes (request
+                             validation, "is an upload needed", upload URL), open-connection
+                             tracking, stream tokens
+  Scenes/                    scene upload, dashboard scene routes, versions and deletion, object
+                             registry; SceneRevisions (does this version exist)
   Scenes/Processing/         background registry build and gltf-transform optimization
   Sessions/                  dashboard session routes
-  Compiler/                  raw log -> replay: reconstruction, curve fitting, replay file writer, worker
+  Compiler/                  raw log -> replay: reconstruction, curve fitting, replay file writer,
+                             SessionActivity (the glyph), coordinate conversion, worker
   Protocol/                  wire decoder (v3), event types, dequantization
   Storage/                   file locations, raw log reader/writer
   Logging/                   console logging, exception handling

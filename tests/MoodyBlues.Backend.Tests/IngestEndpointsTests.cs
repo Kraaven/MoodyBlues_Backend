@@ -16,6 +16,7 @@ public class IngestEndpointsTests : IDisposable
     private static readonly string Hash = new('a', 64);
     private static readonly string OtherHash = new('b', 64);
     private readonly string _root = Path.Combine(Path.GetTempPath(), "mb-ingest-tests-" + Guid.NewGuid().ToString("N"));
+    private readonly Guid _p = Guid.NewGuid();
     private readonly ServerConfig _config;
     private readonly StoragePaths _paths;
 
@@ -37,9 +38,9 @@ public class IngestEndpointsTests : IDisposable
     public async Task Handshake_NewSession_CreatesRow_AndAsksForUpload()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
 
-        var result = await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-1"), KeyedRequest("dev1"), db, _config);
+        var result = await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-1"), KeyedRequest(_p), db, _config);
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(result);
 
         Assert.True(response!.SceneUploadRequired);
@@ -49,36 +50,36 @@ public class IngestEndpointsTests : IDisposable
         Session session = await db.Sessions.SingleAsync();
         Assert.Equal(SessionStatus.Recording, session.Status);
         string token = response.StreamToken;
-        Assert.Equal(StreamTokens.Hash(token), session.StreamTokenHash);
-        Assert.True(await db.Developers.AnyAsync(d => d.Id == "dev1"));
+        Assert.Equal(Hashing.Sha256Hex(token), session.StreamTokenHash);
+        Assert.Equal(_p, session.ProjectId);
     }
 
     [Fact]
     public async Task Handshake_Retry_ReusesSession_AndRotatesToken()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
         var request = new HandshakeRequest("scene1", Hash, "run-1");
 
-        var first = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
-        var second = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
+        var first = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest(_p), db, _config));
+        var second = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(await HandshakeEndpoints.HandleAsync(request, KeyedRequest(_p), db, _config));
 
         Assert.Equal(1, await db.Sessions.CountAsync());
         Assert.NotEqual(first!.StreamToken, second!.StreamToken);
-        Assert.Equal(StreamTokens.Hash(second.StreamToken), (await db.Sessions.SingleAsync()).StreamTokenHash);
+        Assert.Equal(Hashing.Sha256Hex(second.StreamToken), (await db.Sessions.SingleAsync()).StreamTokenHash);
     }
 
     [Fact]
     public async Task Handshake_AfterSessionEnded_IsRefused()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
         var request = new HandshakeRequest("scene1", Hash, "run-1");
-        await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config);
+        await HandshakeEndpoints.HandleAsync(request, KeyedRequest(_p), db, _config);
         (await db.Sessions.SingleAsync()).Status = SessionStatus.Ready;
         await db.SaveChangesAsync();
 
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await HandshakeEndpoints.HandleAsync(request, KeyedRequest("dev1"), db, _config));
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await HandshakeEndpoints.HandleAsync(request, KeyedRequest(_p), db, _config));
 
         Assert.Equal(409, status);
     }
@@ -87,13 +88,49 @@ public class IngestEndpointsTests : IDisposable
     public async Task Handshake_KnownRevision_DoesNotAskForUpload()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedRevisionAsync(db, "dev1", "scene1", Hash);
+        await SeedRevisionAsync(db, _p, "scene1", Hash);
 
         var response = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<HandshakeResponse>(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-2"), KeyedRequest("dev1"), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", Hash, "run-2"), KeyedRequest(_p), db, _config));
 
         Assert.False(response!.SceneUploadRequired);
         Assert.Null(response.SceneUploadUrl);
+    }
+
+    [Fact]
+    public async Task Handshake_SameClientSessionIdInTwoProjects_CreatesTwoSessions()
+    {
+        using var db = TestDbContextFactory.Create();
+        Guid other = Guid.NewGuid();
+        await SeedProjectAsync(db, _p);
+        await SeedProjectAsync(db, other);
+        var request = new HandshakeRequest("scene1", Hash, "run-1");
+
+        await HandshakeEndpoints.HandleAsync(request, KeyedRequest(_p), db, _config);
+        await HandshakeEndpoints.HandleAsync(request, KeyedRequest(other), db, _config);
+
+        Assert.Equal(new[] { _p, other }.Order(), db.Sessions.Select(s => s.ProjectId).ToList().Order());
+        Assert.Equal(Path.Combine(_p.ToString("N"), (await db.Sessions.FirstAsync(s => s.ProjectId == _p)).Id.ToString("N"), StoragePaths.RawLogFile),
+                     (await db.Sessions.FirstAsync(s => s.ProjectId == _p)).RawLogPath);
+    }
+
+    [Fact]
+    public async Task SceneCheck_ReportsWhetherTheVersionIsStored_PerProject()
+    {
+        using var db = TestDbContextFactory.Create();
+        await SeedRevisionAsync(db, _p, "scene1", Hash);
+        Guid other = Guid.NewGuid();
+        await SeedProjectAsync(db, other);
+
+        var known = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<SceneCheckResponse>(
+            await SceneCheckEndpoints.HandleAsync(new SceneCheckRequest("scene1", Hash), KeyedRequest(_p), db, _config));
+        var otherProject = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<SceneCheckResponse>(
+            await SceneCheckEndpoints.HandleAsync(new SceneCheckRequest("scene1", Hash), KeyedRequest(other), db, _config));
+
+        Assert.False(known!.SceneUploadRequired);
+        Assert.Null(known.SceneUploadUrl);
+        Assert.True(otherProject!.SceneUploadRequired);
+        Assert.Equal($"http://localhost:8765/scenes/scene1?sceneHash={Hash}", otherProject.SceneUploadUrl);
     }
 
     [Theory]
@@ -105,7 +142,7 @@ public class IngestEndpointsTests : IDisposable
     {
         using var db = TestDbContextFactory.Create();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest(sceneId, Hash, sessionId), KeyedRequest("dev1"), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest(sceneId, Hash, sessionId), KeyedRequest(_p), db, _config));
         Assert.Equal(400, status);
     }
 
@@ -114,7 +151,7 @@ public class IngestEndpointsTests : IDisposable
     {
         using var db = TestDbContextFactory.Create();
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
-            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", "not-a-hash", "run"), KeyedRequest("dev1"), db, _config));
+            await HandshakeEndpoints.HandleAsync(new HandshakeRequest("scene1", "not-a-hash", "run"), KeyedRequest(_p), db, _config));
         Assert.Equal(400, status);
     }
 
@@ -122,14 +159,14 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_StoresAnImmutableRevision_PerHash()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
         byte[] glb = FakeGlb(1000);
 
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "dev1", "scene1", Hash, glb, gzip: true));
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, _p, "scene1", Hash, glb, gzip: true));
         Assert.Equal(200, status);
-        await UploadAsync(db, "dev1", "scene1", OtherHash, FakeGlb(500), gzip: false);
+        await UploadAsync(db, _p, "scene1", OtherHash, FakeGlb(500), gzip: false);
 
-        SceneRevision first = await db.SceneRevisions.FindAsync("dev1", "scene1", Hash) ?? throw new Exception("missing");
+        SceneRevision first = await db.SceneRevisions.FindAsync(_p, "scene1", Hash) ?? throw new Exception("missing");
         Assert.Equal(glb.Length, first.RawSizeBytes);
         Assert.Equal(glb, await File.ReadAllBytesAsync(_paths.SceneFull(first.RawGlbPath)));
         Assert.Equal(2, await db.SceneRevisions.CountAsync());
@@ -140,11 +177,11 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_SameHashTwice_KeepsTheFirstFile()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
         byte[] original = FakeGlb(100);
 
-        await UploadAsync(db, "dev1", "scene1", Hash, original, gzip: false);
-        await UploadAsync(db, "dev1", "scene1", Hash, FakeGlb(200), gzip: false);
+        await UploadAsync(db, _p, "scene1", Hash, original, gzip: false);
+        await UploadAsync(db, _p, "scene1", Hash, FakeGlb(200), gzip: false);
 
         SceneRevision revision = await db.SceneRevisions.SingleAsync();
         Assert.Equal(original, await File.ReadAllBytesAsync(_paths.SceneFull(revision.RawGlbPath)));
@@ -154,24 +191,24 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_NotAGlb_IsRejected_AndNothingIsStored()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
 
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "dev1", "scene1", Hash, [1, 2, 3, 4, 5], gzip: false));
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, _p, "scene1", Hash, [1, 2, 3, 4, 5], gzip: false));
 
         Assert.Equal(400, status);
         Assert.Empty(db.SceneRevisions);
-        Assert.False(Directory.Exists(Path.Combine(_config.ScenesDir, "dev1", "scene1", Hash)) &&
-                     Directory.EnumerateFiles(Path.Combine(_config.ScenesDir, "dev1", "scene1", Hash)).Any());
+        Assert.False(Directory.Exists(Path.Combine(_config.ScenesDir, _p.ToString("N"), "scene1", Hash)) &&
+                     Directory.EnumerateFiles(Path.Combine(_config.ScenesDir, _p.ToString("N"), "scene1", Hash)).Any());
     }
 
     [Fact]
     public async Task Upload_TooLarge_IsRejected()
     {
         using var db = TestDbContextFactory.Create();
-        await SeedProjectAsync(db, "dev1");
+        await SeedProjectAsync(db, _p);
         var small = new ServerConfig { ScenesDir = _config.ScenesDir, MaxSceneUploadBytes = 1000 };
 
-        IResult result = await SceneUploadEndpoints.HandleAsync("scene1", Request("dev1", Hash, FakeGlb(5000), gzip: false), db, small, _paths, new SceneWorkSignal());
+        IResult result = await SceneUploadEndpoints.HandleAsync("scene1", Request(_p, Hash, FakeGlb(5000), gzip: false), db, small, _paths, new SceneWorkSignal());
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(result);
 
         Assert.Equal(413, status);
@@ -182,18 +219,18 @@ public class IngestEndpointsTests : IDisposable
     public async Task Upload_UnknownKey_IsRejected()
     {
         using var db = TestDbContextFactory.Create();
-        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, "nobody", "scene1", Hash, FakeGlb(10), gzip: false));
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, Guid.NewGuid(), "scene1", Hash, FakeGlb(10), gzip: false));
         Assert.Equal(401, status);
     }
 
-    /// <summary>The ingest key of the project seeded for <paramref name="developerId"/>. The key identifies the project.</summary>
-    internal static string KeyFor(string developerId) => IngestAccess.KeyPrefix + "test-" + developerId;
+    /// <summary>The ingest key of the project seeded for <paramref name="projectId"/>. The key identifies the project.</summary>
+    internal static string KeyFor(Guid projectId) => IngestAccess.KeyPrefix + "test-" + projectId.ToString("N");
 
-    /// <summary>A request carrying the ingest key of <paramref name="developerId"/>'s seeded project.</summary>
-    internal static HttpRequest KeyedRequest(string developerId)
+    /// <summary>A request carrying the ingest key of <paramref name="projectId"/>'s seeded project.</summary>
+    internal static HttpRequest KeyedRequest(Guid projectId)
     {
         var context = new DefaultHttpContext();
-        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(developerId);
+        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(projectId);
         return context.Request;
     }
 
@@ -205,10 +242,10 @@ public class IngestEndpointsTests : IDisposable
         return bytes;
     }
 
-    private Task<IResult> UploadAsync(MoodyBluesDbContext db, string developerId, string sceneId, string hash, byte[] body, bool gzip) =>
-        SceneUploadEndpoints.HandleAsync(sceneId, Request(developerId, hash, body, gzip), db, _config, _paths, new SceneWorkSignal());
+    private Task<IResult> UploadAsync(MoodyBluesDbContext db, Guid projectId, string sceneId, string hash, byte[] body, bool gzip) =>
+        SceneUploadEndpoints.HandleAsync(sceneId, Request(projectId, hash, body, gzip), db, _config, _paths, new SceneWorkSignal());
 
-    private static HttpRequest Request(string developerId, string hash, byte[] body, bool gzip)
+    private static HttpRequest Request(Guid projectId, string hash, byte[] body, bool gzip)
     {
         byte[] payload = body;
         if (gzip)
@@ -226,36 +263,46 @@ public class IngestEndpointsTests : IDisposable
 
         var context = new DefaultHttpContext();
         context.Request.QueryString = new QueryString($"?sceneHash={hash}");
-        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(developerId);
+        context.Request.Headers[IngestAccess.HeaderName] = KeyFor(projectId);
         context.Request.Body = gzip ? new GZipStream(new MemoryStream(payload), CompressionMode.Decompress) : new MemoryStream(payload);
         return context.Request;
     }
 
-    /// <summary>Ingest endpoints only accept developer IDs that belong to a dashboard project.</summary>
-    internal static async Task SeedProjectAsync(MoodyBluesDbContext db, string developerId)
+    /// <summary>Ingest endpoints only accept ingest keys that belong to a project; this creates that project (once).</summary>
+    internal static async Task SeedProjectAsync(MoodyBluesDbContext db, Guid projectId)
     {
-        await DeveloperProvisioning.EnsureExistsAsync(db, developerId);
-        if (!await db.Projects.AnyAsync(p => p.DeveloperId == developerId))
+        if (!await db.Projects.AnyAsync(p => p.Id == projectId))
         {
-            db.Projects.Add(new Project { Id = Guid.NewGuid(), UserId = Guid.NewGuid(), Name = developerId, DeveloperId = developerId, CreatedAtUtc = DateTime.UtcNow, IngestKeyHash = IngestAccess.Hash(KeyFor(developerId)) });
+            string key = KeyFor(projectId);
+            db.Projects.Add(new Project
+            {
+                Id = projectId,
+                UserId = Guid.NewGuid(),
+                Name = "project",
+                CreatedAtUtc = DateTime.UtcNow,
+                IngestKeyHash = Hashing.Sha256Hex(key),
+                IngestKeyEncrypted = TestProjects.Protector.Protect(key, projectId),
+                IngestKeyPrefix = IngestAccess.DisplayPrefix(key),
+                IngestKeyCreatedAtUtc = DateTime.UtcNow,
+            });
             await db.SaveChangesAsync();
         }
     }
 
-    internal static async Task SeedRevisionAsync(MoodyBluesDbContext db, string developerId, string sceneId, string hash, string? rawPath = null)
+    internal static async Task SeedRevisionAsync(MoodyBluesDbContext db, Guid projectId, string sceneId, string hash, string? rawPath = null)
     {
-        await SeedProjectAsync(db, developerId);
-        if (await db.Scenes.FindAsync(developerId, sceneId) is null)
+        await SeedProjectAsync(db, projectId);
+        if (await db.Scenes.FindAsync(projectId, sceneId) is null)
         {
-            db.Scenes.Add(new Scene { DeveloperId = developerId, SceneId = sceneId, LatestHash = hash, CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow });
+            db.Scenes.Add(new Scene { ProjectId = projectId, SceneId = sceneId, LatestHash = hash, CreatedAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow });
         }
 
         db.SceneRevisions.Add(new SceneRevision
         {
-            DeveloperId = developerId,
+            ProjectId = projectId,
             SceneId = sceneId,
             Hash = hash,
-            RawGlbPath = rawPath ?? Path.Combine(developerId, sceneId, hash, StoragePaths.RawGlbFile),
+            RawGlbPath = rawPath ?? Path.Combine(projectId.ToString("N"), sceneId, hash, "raw.glb"),
             CreatedAtUtc = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();

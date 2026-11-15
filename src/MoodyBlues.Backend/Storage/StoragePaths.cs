@@ -9,17 +9,19 @@ namespace MoodyBlues.Backend.Storage;
 /// </summary>
 public sealed class StoragePaths(ServerConfig config)
 {
-    public const string RawGlbFile = "raw.glb";
     public const string OptimizedGlbFile = "optimized.glb";
     public const string RegistryFile = "registry.json";
     public const string RawLogFile = "raw.mblog";
     public const string ReplayFile = "replay.mbr.gz";
 
-    public static string SceneRevisionDir(string developerId, string sceneId, string hash) =>
-        Path.Combine(developerId, sceneId, hash);
+    public static string SceneRevisionDir(Guid projectId, string sceneId, string hash) =>
+        Path.Combine(projectId.ToString("N"), sceneId, hash);
 
-    public static string SessionDir(string developerId, Guid sessionId) =>
-        Path.Combine(developerId, sessionId.ToString("N"));
+    public static string SceneDir(Guid projectId, string sceneId) =>
+        Path.Combine(projectId.ToString("N"), sceneId);
+
+    public static string SessionDir(Guid projectId, Guid sessionId) =>
+        Path.Combine(projectId.ToString("N"), sessionId.ToString("N"));
 
     public string SceneFull(string relativePath) => Path.GetFullPath(Path.Combine(config.ScenesDir, relativePath));
 

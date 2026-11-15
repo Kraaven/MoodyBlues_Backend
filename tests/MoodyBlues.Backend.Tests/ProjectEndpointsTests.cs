@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Projects;
+using MoodyBlues.Backend.Scenes;
 
 namespace MoodyBlues.Backend.Tests;
 
@@ -11,7 +13,7 @@ namespace MoodyBlues.Backend.Tests;
 public class ProjectEndpointsTests
 {
     [Fact]
-    public async Task Create_GeneratesUniqueDeveloperId_AndProvisionsDeveloper()
+    public async Task Create_StoresTheProject_WithItsFirstIngestKey()
     {
         using var db = TestDbContextFactory.Create();
         Guid userId = Guid.NewGuid();
@@ -21,13 +23,17 @@ public class ProjectEndpointsTests
 
         Assert.NotNull(response);
         Assert.Equal("My Game", response!.Name);
-        Assert.False(string.IsNullOrWhiteSpace(response.DeveloperId));
         Assert.Equal(0, response.SceneCount);
+        Assert.StartsWith(IngestAccess.KeyPrefix, response.IngestKeyPrefix);
 
-        Assert.True(await db.Developers.AnyAsync(d => d.Id == response.DeveloperId));
         Project? project = await db.Projects.FindAsync(response.Id);
         Assert.NotNull(project);
         Assert.Equal(userId, project!.UserId);
+        Assert.Equal(response.IngestKeyPrefix, project.IngestKeyPrefix);
+
+        // The stored hash is the one the Unity client's key resolves through.
+        string key = TestProjects.Protector.TryUnprotect(project.IngestKeyEncrypted, project.Id)!;
+        Assert.Equal(Hashing.Sha256Hex(key), project.IngestKeyHash);
     }
 
     [Fact]
@@ -60,7 +66,7 @@ public class ProjectEndpointsTests
     }
 
     [Fact]
-    public async Task Get_IncludesScenesForThatDeveloperId()
+    public async Task Get_IncludesScenesOfThatProject_WithConnectionString()
     {
         using var db = TestDbContextFactory.Create();
         Guid userId = Guid.NewGuid();
@@ -70,7 +76,7 @@ public class ProjectEndpointsTests
 
         db.Scenes.Add(new Scene
         {
-            DeveloperId = created!.DeveloperId,
+            ProjectId = created!.Id,
             SceneId = "scene-1",
             LatestHash = new string('a', 64),
             DisplayName = "Renamed Scene",
@@ -79,7 +85,7 @@ public class ProjectEndpointsTests
         });
         db.SceneRevisions.Add(new SceneRevision
         {
-            DeveloperId = created.DeveloperId,
+            ProjectId = created.Id,
             SceneId = "scene-1",
             Hash = new string('a', 64),
             RawGlbPath = "raw.glb",
@@ -97,6 +103,48 @@ public class ProjectEndpointsTests
         Assert.Equal("Renamed Scene", detail.Scenes[0].DisplayName);
         Assert.Equal(2048, detail.Scenes[0].SizeBytes);
         Assert.Equal(SceneProcessingStatus.Pending, detail.Scenes[0].ProcessingStatus);
+        Assert.StartsWith("http://" + IngestAccess.KeyPrefix, detail.ConnectionString);
+    }
+
+    [Fact]
+    public async Task Get_KeyThatCannotBeDecrypted_HasNoConnectionString()
+    {
+        using var db = TestDbContextFactory.Create();
+        Guid userId = Guid.NewGuid();
+        var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(
+            await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Moved secret"), TestPrincipal.For(userId), db, TestProjects.Protector));
+
+        // The same database read by a server whose JWT secret (the encryption key's source) changed.
+        var otherSecret = new IngestKeyProtector(new Config.ServerConfig { JwtSecret = new string('x', 40) });
+        var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectDetailResponse>(
+            await ProjectEndpoints.GetAsync(created!.Id, TestPrincipal.For(userId), db, TestProjects.Config, otherSecret));
+
+        Assert.Null(detail!.ConnectionString);
+        Assert.Equal(created.IngestKeyPrefix, detail.IngestKeyPrefix);
+    }
+
+    [Fact]
+    public async Task Get_SceneListBuiltFromOneRevisionQuery_PicksEachScenesOwnLatestRevision()
+    {
+        using var db = TestDbContextFactory.Create();
+        Guid userId = Guid.NewGuid();
+        var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(
+            await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Two scenes"), TestPrincipal.For(userId), db, TestProjects.Protector));
+        string oldHash = new('1', 64), newHash = new('2', 64);
+
+        await IngestEndpointsTests.SeedRevisionAsync(db, created!.Id, "a", oldHash);
+        await IngestEndpointsTests.SeedRevisionAsync(db, created.Id, "b", oldHash);
+        db.SceneRevisions.Add(new SceneRevision { ProjectId = created.Id, SceneId = "a", Hash = newHash, Version = 2, RawGlbPath = "x", RawSizeBytes = 99, CreatedAtUtc = DateTime.UtcNow });
+        (await db.Scenes.FindAsync(created.Id, "a"))!.LatestHash = newHash;
+        await db.SaveChangesAsync();
+
+        var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectDetailResponse>(
+            await ProjectEndpoints.GetAsync(created.Id, TestPrincipal.For(userId), db, TestProjects.Config, TestProjects.Protector));
+
+        Assert.Equal(2, detail!.Scenes.Count);
+        Assert.Equal(2, detail.Scenes.Single(x => x.SceneId == "a").CurrentVersion);
+        Assert.Equal(99, detail.Scenes.Single(x => x.SceneId == "a").SizeBytes);
+        Assert.Equal(0, detail.Scenes.Single(x => x.SceneId == "b").CurrentVersion);
     }
 
     [Fact]

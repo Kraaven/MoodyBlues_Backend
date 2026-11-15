@@ -35,7 +35,7 @@ public sealed class Session
 {
     public required Guid Id { get; set; }
 
-    public required string DeveloperId { get; set; }
+    public required Guid ProjectId { get; set; }
 
     public required string SceneId { get; set; }
 
@@ -45,7 +45,7 @@ public sealed class Session
     /// <summary>The Unity client's per-run session GUID. A repeated handshake with the same value reuses this row.</summary>
     public required string ClientSessionId { get; set; }
 
-    /// <summary>SHA-256 (hex) of the secret token in the WebSocket URL. The token itself is never stored.</summary>
+    /// <summary>SHA-256 (hex) of the stream token the client sends in a header on the WebSocket upgrade. The token itself is never stored.</summary>
     public required string StreamTokenHash { get; set; }
 
     public SessionStatus Status { get; set; } = SessionStatus.Recording;
@@ -77,8 +77,6 @@ public sealed class Session
 
     public int SpawnCount { get; set; }
 
-    public long RawEventCount { get; set; }
-
     public long KeyframeCount { get; set; }
 
     /// <summary>Client-reported counters from EndSession (Unity Spec 6.1). HardClamps &gt; 0 means some transforms are wrong.</summary>
@@ -88,12 +86,21 @@ public sealed class Session
 
     public long DroppedEvents { get; set; }
 
+    /// <summary>Rotation channels the client had to widen from a narrower encoding (Unity Spec 6.1).</summary>
+    public long RotationWidenings { get; set; }
+
     /// <summary>Developer logs in the compiled replay, per level (Unity Spec 6.7). 0 until compiled.</summary>
     public int InfoLogCount { get; set; }
 
     public int WarningLogCount { get; set; }
 
     public int ErrorLogCount { get; set; }
+
+    /// <summary>
+    /// The session's activity glyph (<see cref="Compiler.SessionActivity"/>) as JSON, computed by the
+    /// compiler. Null until the session is Ready.
+    /// </summary>
+    public string? ActivityJson { get; set; }
 
     public int CompilerVersion { get; set; }
 

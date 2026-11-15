@@ -60,7 +60,7 @@ public sealed class StreamServer(
         using (IServiceScope scope = scopeFactory.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
-            string hash = StreamTokens.Hash(token);
+            string hash = Hashing.Sha256Hex(token);
             session = await db.Sessions.AsNoTracking().FirstOrDefaultAsync(s => s.StreamTokenHash == hash);
         }
 
@@ -92,7 +92,7 @@ public sealed class StreamServer(
         uint connectionIndex = 0;
         bool opened = false;
 
-        var decoder = new WireDecoder(requireBeginSession: true);
+        var decoder = new WireDecoder();
         var endDetector = new EndSessionDetector();
         var buffer = new byte[16 * 1024];
         using var message = new MemoryStream();
@@ -364,21 +364,10 @@ public sealed class StreamServer(
     }
 
     /// <summary>Notices EndSession during validation-decode without keeping any other state.</summary>
-    private sealed class EndSessionDetector : IWireEventSink
+    private sealed class EndSessionDetector : WireEventSinkBase
     {
         public bool Seen { get; private set; }
 
-        public void OnEndSession(in EndSessionInfo info) => Seen = true;
-
-        public void OnTimeStamp(double seconds) { }
-        public void OnBeginSession(in BeginSessionInfo info) { }
-        public void OnKeepAlive() { }
-        public void OnShow(ushort objectId) { }
-        public void OnHide(ushort objectId) { }
-        public void OnDelete(ushort objectId) { }
-        public void OnInstantiate(ushort objectId, ushort templateObjectId, ushort parentObjectId, System.Numerics.Vector3 position, System.Numerics.Quaternion rotation, System.Numerics.Vector3 scale) { }
-        public void OnReparent(ushort objectId, ushort newParentObjectId, System.Numerics.Vector3 position, System.Numerics.Quaternion rotation, System.Numerics.Vector3 scale) { }
-        public void OnTransform(ushort objectId, in TransformUpdate update) { }
-        public void OnLog(byte style, ReadOnlySpan<byte> utf8Text) { }
+        public override void OnEndSession(in EndSessionInfo info) => Seen = true;
     }
 }

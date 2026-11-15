@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace MoodyBlues.Backend.Migrations
 {
     [DbContext(typeof(MoodyBluesDbContext))]
-    [Migration("20261108132128_IngestKeyLookup")]
-    partial class IngestKeyLookup
+    [Migration("20261113155221_Initial")]
+    partial class Initial
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -59,19 +59,6 @@ namespace MoodyBlues.Backend.Migrations
                     b.ToTable("AuditEvents");
                 });
 
-            modelBuilder.Entity("MoodyBlues.Backend.Data.Developer", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("Developers");
-                });
-
             modelBuilder.Entity("MoodyBlues.Backend.Data.Project", b =>
                 {
                     b.Property<Guid>("Id")
@@ -81,20 +68,19 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("DeveloperId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime?>("IngestKeyCreatedAtUtc")
+                    b.Property<DateTime>("IngestKeyCreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("IngestKeyEncrypted")
+                        .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<string>("IngestKeyHash")
+                        .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<string>("IngestKeyPrefix")
+                        .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<string>("Name")
@@ -105,9 +91,6 @@ namespace MoodyBlues.Backend.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("DeveloperId")
-                        .IsUnique();
 
                     b.HasIndex("IngestKeyHash")
                         .IsUnique();
@@ -159,8 +142,8 @@ namespace MoodyBlues.Backend.Migrations
 
             modelBuilder.Entity("MoodyBlues.Backend.Data.Scene", b =>
                 {
-                    b.Property<string>("DeveloperId")
-                        .HasColumnType("text");
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("SceneId")
                         .HasColumnType("text");
@@ -178,15 +161,15 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.HasKey("DeveloperId", "SceneId");
+                    b.HasKey("ProjectId", "SceneId");
 
                     b.ToTable("Scenes");
                 });
 
             modelBuilder.Entity("MoodyBlues.Backend.Data.SceneRevision", b =>
                 {
-                    b.Property<string>("DeveloperId")
-                        .HasColumnType("text");
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("SceneId")
                         .HasColumnType("text");
@@ -231,11 +214,11 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<int>("Version")
                         .HasColumnType("integer");
 
-                    b.HasKey("DeveloperId", "SceneId", "Hash");
+                    b.HasKey("ProjectId", "SceneId", "Hash");
 
                     b.HasIndex("Status");
 
-                    b.HasIndex("DeveloperId", "SceneId", "Version")
+                    b.HasIndex("ProjectId", "SceneId", "Version")
                         .IsUnique();
 
                     b.ToTable("SceneRevisions");
@@ -246,6 +229,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<string>("ActivityJson")
+                        .HasColumnType("jsonb");
 
                     b.Property<string>("ClientSessionId")
                         .IsRequired()
@@ -265,10 +251,6 @@ namespace MoodyBlues.Backend.Migrations
 
                     b.Property<long>("DeltaPromotions")
                         .HasColumnType("bigint");
-
-                    b.Property<string>("DeveloperId")
-                        .IsRequired()
-                        .HasColumnType("text");
 
                     b.Property<long>("DroppedEvents")
                         .HasColumnType("bigint");
@@ -300,8 +282,8 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<int>("ObjectCount")
                         .HasColumnType("integer");
 
-                    b.Property<long>("RawEventCount")
-                        .HasColumnType("bigint");
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("RawLogPath")
                         .IsRequired()
@@ -314,6 +296,9 @@ namespace MoodyBlues.Backend.Migrations
                         .HasColumnType("text");
 
                     b.Property<long>("ReplaySizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("RotationWidenings")
                         .HasColumnType("bigint");
 
                     b.Property<string>("SceneHash")
@@ -344,10 +329,10 @@ namespace MoodyBlues.Backend.Migrations
                     b.HasIndex("StreamTokenHash")
                         .IsUnique();
 
-                    b.HasIndex("DeveloperId", "ClientSessionId")
+                    b.HasIndex("ProjectId", "ClientSessionId")
                         .IsUnique();
 
-                    b.HasIndex("DeveloperId", "SceneId");
+                    b.HasIndex("ProjectId", "SceneId");
 
                     b.ToTable("Sessions");
                 });
@@ -397,9 +382,9 @@ namespace MoodyBlues.Backend.Migrations
 
             modelBuilder.Entity("MoodyBlues.Backend.Data.Scene", b =>
                 {
-                    b.HasOne("MoodyBlues.Backend.Data.Developer", null)
+                    b.HasOne("MoodyBlues.Backend.Data.Project", null)
                         .WithMany()
-                        .HasForeignKey("DeveloperId")
+                        .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -408,16 +393,16 @@ namespace MoodyBlues.Backend.Migrations
                 {
                     b.HasOne("MoodyBlues.Backend.Data.Scene", null)
                         .WithMany()
-                        .HasForeignKey("DeveloperId", "SceneId")
+                        .HasForeignKey("ProjectId", "SceneId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 
             modelBuilder.Entity("MoodyBlues.Backend.Data.Session", b =>
                 {
-                    b.HasOne("MoodyBlues.Backend.Data.Developer", null)
+                    b.HasOne("MoodyBlues.Backend.Data.Project", null)
                         .WithMany()
-                        .HasForeignKey("DeveloperId")
+                        .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

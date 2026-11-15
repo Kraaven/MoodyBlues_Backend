@@ -40,8 +40,8 @@ public class SessionCompilerTests : IDisposable
             for (uint c = 0; c < connections.Length; c++)
             {
                 writer.AppendConnectionOpened(c);
-                writer.Append(RawLogRecordKind.Message, connections[c]);
-                writer.AppendConnectionClosed(RawLogCloseReason.ClientClosed);
+                writer.Append(RawLogRecordKind.Message, connections[c], c);
+                writer.AppendConnectionClosed(RawLogCloseReason.ClientClosed, c);
             }
         }
 

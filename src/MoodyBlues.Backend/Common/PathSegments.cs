@@ -1,7 +1,7 @@
 namespace MoodyBlues.Backend.Common;
 
 /// <summary>
-/// Validates untrusted identifiers (developerId, sceneId, scene hash) before they are used as
+/// Validates untrusted identifiers (sceneId, client session id, scene hash) before they are used as
 /// URL or filesystem path segments. An allow-list rather than a block-list: only ASCII letters,
 /// digits, '-' and '_' are accepted, which rules out separators, "..", drive prefixes ("C:"),
 /// null bytes, trailing dots and reserved device-name tricks in one rule.

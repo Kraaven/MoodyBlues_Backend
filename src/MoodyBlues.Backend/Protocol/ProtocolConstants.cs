@@ -29,9 +29,6 @@ public static class ProtocolConstants
     /// <summary>type + style + text.</summary>
     public const int LogSize = 2 + LogTextBytes;
 
-    /// <summary>Largest single event (Log).</summary>
-    public const int MaxEventSize = LogSize;
-
     /// <summary>Absolute rotations use smallest-three over +/- 1/sqrt(2). Not tunable (Spec 9.5).</summary>
     public const float TrueRotationComponentRange = 0.70711f;
 

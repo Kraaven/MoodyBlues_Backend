@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using MoodyBlues.Backend.Common;
+using MoodyBlues.Backend.Compiler;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Projects;
@@ -31,18 +32,19 @@ public class DashboardEndpointsTests : IDisposable
         }
     }
 
-    private async Task<(Guid User, string Dev, MoodyBluesDbContext Db)> SeedAsync()
+    private async Task<(Guid User, Guid Dev, MoodyBluesDbContext Db)> SeedAsync()
     {
         var db = TestDbContextFactory.Create();
         Guid user = Guid.NewGuid();
         var created = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(
             await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Game"), TestPrincipal.For(user), db, TestProjects.Protector));
-        string dev = created!.DeveloperId;
+        Guid dev = created!.Id;
 
         foreach (string hash in new[] { HashA, HashB })
         {
             await IngestEndpointsTests.SeedRevisionAsync(db, dev, "scene1", hash);
             SceneRevision r = (await db.SceneRevisions.FindAsync(dev, "scene1", hash))!;
+            r.Version = hash == HashA ? 1 : 2;
             string full = _paths.SceneFull(r.RawGlbPath);
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);
             await File.WriteAllBytesAsync(full, IngestEndpointsTests.FakeGlb(64));
@@ -89,7 +91,7 @@ public class DashboardEndpointsTests : IDisposable
 
         SceneResponse scene = Assert.Single(detail!.Scenes);
         Assert.Equal(HashB, scene.LatestHash);
-        Assert.Equal(2, scene.RevisionCount);
+        Assert.Equal(2, scene.CurrentVersion);
     }
 
     [Fact]
@@ -99,7 +101,7 @@ public class DashboardEndpointsTests : IDisposable
         var session = new Session
         {
             Id = Guid.NewGuid(),
-            DeveloperId = dev,
+            ProjectId = dev,
             SceneId = "scene1",
             SceneHash = HashA,
             ClientSessionId = "run",
@@ -135,5 +137,95 @@ public class DashboardEndpointsTests : IDisposable
         var (status, _) = await HttpResultTestHelpers.ExecuteAsync(
             await SessionEndpoints.ListAsync(dev, "scene1", null, null, TestPrincipal.For(Guid.NewGuid()), db));
         Assert.Equal(404, status);
+    }
+
+    [Fact]
+    public async Task SceneRoutes_AnotherProjectsId_GetsNotFound_EvenForTheSameOwner()
+    {
+        var (user, _, db) = await SeedAsync();
+        var second = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<ProjectSummaryResponse>(
+            await ProjectEndpoints.CreateAsync(new CreateProjectRequest("Other game"), TestPrincipal.For(user), db, TestProjects.Protector));
+
+        // The caller owns the project, but the scene lives in the first one.
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await SceneEndpoints.GetAsync(second!.Id, "scene1", TestPrincipal.For(user), db));
+        Assert.Equal(404, status);
+    }
+
+    [Fact]
+    public async Task SceneDetail_CarriesTheProjectId_AndDeleteByANonOwnerChangesNothing()
+    {
+        var (user, dev, db) = await SeedAsync();
+
+        var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<SceneDetailResponse>(
+            await SceneEndpoints.GetAsync(dev, "scene1", TestPrincipal.For(user), db));
+        Assert.Equal(dev, detail!.ProjectId);
+        Assert.Equal(2, detail.Current!.Version);
+        Assert.Equal(HashA, Assert.Single(detail.Archived).Hash);
+
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await SceneEndpoints.DeleteSceneAsync(
+            dev, "scene1", TestPrincipal.For(Guid.NewGuid()), db, _paths, new Ingest.ActiveConnections()));
+        Assert.Equal(404, status);
+        Assert.Equal(2, db.SceneRevisions.Count());
+    }
+
+    [Fact]
+    public async Task Sessions_DetailAndList_CarryProjectIdWideningsAndActivity()
+    {
+        var (user, dev, db) = await SeedAsync();
+        var activity = new SessionActivity([0.5, 1], [0.25], [], [0.1], [[0.4, 0.5]]);
+        var session = new Session
+        {
+            Id = Guid.NewGuid(),
+            ProjectId = dev,
+            SceneId = "scene1",
+            SceneHash = HashA,
+            ClientSessionId = "run",
+            StreamTokenHash = "x",
+            RawLogPath = "raw",
+            Status = SessionStatus.Ready,
+            RotationWidenings = 9,
+            ActivityJson = activity.ToJson(),
+            CreatedAtUtc = DateTime.UtcNow,
+            LastActivityUtc = DateTime.UtcNow,
+        };
+        db.Sessions.Add(session);
+        await db.SaveChangesAsync();
+
+        var detail = await HttpResultTestHelpers.ExecuteAndDeserializeAsync<SessionDetailResponse>(
+            await SessionEndpoints.GetAsync(session.Id.ToString(), TestPrincipal.For(user), db));
+        Assert.Equal(dev, detail!.ProjectId);
+        Assert.Equal(9, detail.RotationWidenings);
+        Assert.Equal(activity.Bins, detail.Activity!.Bins);
+        Assert.Equal([0.4, 0.5], Assert.Single(detail.Activity.Gaps));
+
+        var (_, listBody) = await HttpResultTestHelpers.ExecuteAsync(
+            await SessionEndpoints.ListAsync(dev, "scene1", null, null, TestPrincipal.For(user), db));
+        var list = System.Text.Json.JsonSerializer.Deserialize<List<SessionSummaryResponse>>(
+            listBody, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        SessionSummaryResponse summary = Assert.Single(list!);
+        Assert.Equal(1, summary.SceneVersion);
+        Assert.Equal(activity.Spawns, summary.Activity!.Spawns);
+        Assert.Contains("\"bins\":[0.5,1]", listBody);
+        Assert.DoesNotContain("rawEventCount", listBody);
+
+        var (otherUser, _) = await HttpResultTestHelpers.ExecuteAsync(
+            await SessionEndpoints.GetAsync(session.Id.ToString(), TestPrincipal.For(Guid.NewGuid()), db));
+        Assert.Equal(404, otherUser);
+    }
+
+    [Fact]
+    public async Task Sessions_NotReady_HaveNullActivity()
+    {
+        var (user, dev, db) = await SeedAsync();
+        db.Sessions.Add(new Session
+        {
+            Id = Guid.NewGuid(), ProjectId = dev, SceneId = "scene1", SceneHash = HashA, ClientSessionId = "r",
+            StreamTokenHash = "y", RawLogPath = "raw", CreatedAtUtc = DateTime.UtcNow, LastActivityUtc = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var (_, body) = await HttpResultTestHelpers.ExecuteAsync(
+            await SessionEndpoints.ListAsync(dev, "scene1", null, null, TestPrincipal.For(user), db));
+        Assert.Contains("\"activity\":null", body);
     }
 }

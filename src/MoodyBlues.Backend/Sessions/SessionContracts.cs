@@ -1,3 +1,4 @@
+using MoodyBlues.Backend.Compiler;
 using MoodyBlues.Backend.Data;
 
 namespace MoodyBlues.Backend.Sessions;
@@ -20,11 +21,13 @@ public sealed record SessionSummaryResponse(
     string? ErrorMessage,
     int InfoLogCount,
     int WarningLogCount,
-    int ErrorLogCount);
+    int ErrorLogCount,
+    /// <summary>The session's activity glyph; null until the session is Ready.</summary>
+    SessionActivity? Activity);
 
 public sealed record SessionDetailResponse(
     Guid Id,
-    string DeveloperId,
+    Guid ProjectId,
     string SceneId,
     string SceneHash,
     DateTime CreatedAtUtc,
@@ -35,16 +38,17 @@ public sealed record SessionDetailResponse(
     double DurationSeconds,
     int ObjectCount,
     int SpawnCount,
-    long RawEventCount,
     long KeyframeCount,
     long ReplaySizeBytes,
     long RawLogSizeBytes,
     long DeltaPromotions,
     long HardClamps,
     long DroppedEvents,
+    long RotationWidenings,
     int CompilerVersion,
     DateTime? CompiledAtUtc,
     string? ErrorMessage,
     int InfoLogCount,
     int WarningLogCount,
-    int ErrorLogCount);
+    int ErrorLogCount,
+    SessionActivity? Activity);
