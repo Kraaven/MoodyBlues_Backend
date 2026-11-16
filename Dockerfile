@@ -14,19 +14,20 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 COPY --from=build /app .
 
-# Scene optimization (Scenes/Processing/GltfTransformOptimizer.cs) shells out to
-# `gltf-transform optimize`, which uses KTX-Software's `toktx` for KTX2 textures. Neither ships
-# with the .NET image, so both are installed here.
+# Scene optimization (Scenes/Processing/NodeGltfOptimizer.cs) runs tools/optimize-scene with
+# Node. The script uses the `ktx` tool from KTX-Software for KTX2 textures. Neither ships with
+# the .NET image, so both are installed here.
 #
-# GLTF_TRANSFORM_VERSION is pinned on purpose: the optimizer passes explicit flags, and an
-# unpinned install once silently broke every upload when a flag was removed upstream. Bump it
-# deliberately and re-check GltfTransformOptimizer.BuildArguments against `optimize --help`.
+# The script's npm dependencies (@gltf-transform/*, meshoptimizer, sharp) are pinned to exact
+# versions in tools/optimize-scene/package.json and package-lock.json, and installed with `npm ci`.
+# Bump them there deliberately and re-run the script on a real scene: gltf-transform's behavior
+# (notably which steps rewrite node transforms) changes between releases.
 #
 # Node.js comes from the official tarball (no apt repo / GPG chain). Assets are chosen per
 # architecture so the image builds on amd64 and arm64 hosts.
 ARG NODE_VERSION=24.22.2
-ARG GLTF_TRANSFORM_VERSION=4.5.1
 ARG KTX_VERSION=4.4.2
+COPY tools/optimize-scene/package.json tools/optimize-scene/package-lock.json /opt/optimize-scene/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,target=/root/.npm,sharing=locked \
@@ -37,7 +38,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm -f /tmp/node.tar.xz \
-    && npm install --global "@gltf-transform/cli@${GLTF_TRANSFORM_VERSION}" \
+    && npm ci --omit=dev --prefix /opt/optimize-scene \
     && KTX_ARCH="$(case "$(dpkg --print-architecture)" in amd64) echo x86_64 ;; arm64) echo arm64 ;; *) echo unsupported ;; esac)" \
     && curl -fsSL -o /tmp/ktx-software.deb \
        "https://github.com/KhronosGroup/KTX-Software/releases/download/v${KTX_VERSION}/KTX-Software-${KTX_VERSION}-Linux-${KTX_ARCH}.deb" \
@@ -45,6 +46,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -f /tmp/ktx-software.deb \
     && apt-get purge -y xz-utils \
     && apt-get autoremove -y
+
+COPY tools/optimize-scene/optimize-scene.mjs /opt/optimize-scene/optimize-scene.mjs
 
 # data/scenes and data/sessions are written relative to the working directory (ServerConfig.cs);
 # docker-compose.yml mounts volumes over them. They are created here, owned by the image's

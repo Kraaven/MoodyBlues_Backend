@@ -76,7 +76,7 @@ Postgres sets its password only when its volume is first created. If you change
 `MOODYBLUES_DB_PASSWORD` later, the backend can no longer log in. Either change the password
 inside Postgres too, or start over with `./deploy.sh wipe`, which **deletes all data**.
 
-The Dockerfile's Node.js / `gltf-transform` / `toktx` layer takes several minutes on a cold build.
+The Dockerfile's Node.js / `ktx` / script-dependencies layer takes several minutes on a cold build.
 Docker caches it, so later builds are fast unless that block changes.
 
 ### Container security
@@ -154,7 +154,7 @@ Everything is optional except where a deployment needs it (see `.env` above).
 | `MOODYBLUES_STREAM_HEARTBEAT_SECONDS` | `10` | Interval of the server's KeepAlive on `/stream` |
 | `MOODYBLUES_RECONNECT_GRACE_SECONDS` | `60` | How long a dropped recording waits for its game to reconnect before it is compiled |
 | `MOODYBLUES_COMPILE_TIMEOUT_MINUTES` | `10` | One compile is stopped (and the session marked Failed) after this long |
-| `MOODYBLUES_GLTF_TRANSFORM_CMD` | `gltf-transform` | Scene optimizer executable |
+| `MOODYBLUES_OPTIMIZER_SCRIPT` | `/opt/optimize-scene/optimize-scene.mjs` | Scene optimizer script (run with `node`; `tools/optimize-scene` in the repo) |
 | `MOODYBLUES_OPTIMIZER_MEMORY_MB` | `2048` | Heap limit for the optimizer (Node) process |
 
 **Quotas** (0 turns one off):
@@ -264,8 +264,15 @@ Same validation and rate limit as the handshake. It doesn't create a session.
 The upload is processed in the background (`Scenes/Processing/`):
 1. The **object registry** (`registry.json`) is built from the GLB's `extras.objectId` nodes,
    with node-count, depth and cycle limits, because the GLB is untrusted input.
-2. `gltf-transform optimize` produces a Draco/KTX2 `optimized.glb` for the viewer. If that fails,
-   the raw upload is served instead.
+2. `tools/optimize-scene/optimize-scene.mjs` (Node, with `@gltf-transform/*` pinned in its
+   `package.json`) produces a meshopt/KTX2 `optimized.glb` for the viewer: dedup, weld, prune of
+   unused data, textures resized to at most 2048 px and encoded as KTX2 (ETC1S; UASTC for
+   normal, occlusion and metallic-roughness maps; needs the `ktx` tool from KTX-Software), then
+   meshopt compression. The node hierarchy, node transforms and every node's `extras` are left
+   alone because replays address nodes individually: no instancing, flattening, joining,
+   palette or simplification, empty leaf nodes are kept, and vertex positions are not
+   quantized (that would rewrite node transforms). A gzipped copy, `optimized.glb.gz`, is
+   written next to it. If optimization fails, the raw upload is served instead.
 
 ### `GET /stream` (WebSocket)
 
@@ -328,7 +335,7 @@ names, for example `"Ready"`.
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}` | Delete the scene: closes its live recordings, then removes every version, session and file |
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene: 409) |
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}/archive` | Delete every archived version and their sessions |
-| `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version |
+| `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version. The optimized file is sent as its pre-gzipped copy (`Content-Encoding: gzip`, `Vary: Accept-Encoding`, no byte ranges) when the request accepts gzip. Every response carries `X-MoodyBlues-Decoded-Length` (the GLB size after decoding; CORS-exposed), since `Content-Length` is the gzip size. The same goes for `GET /api/share/{token}/scene` |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/sessions` | Sessions, newest first. `?version=n` filters to one version (404 if it does not exist); `?awaitingScene=true` to sessions waiting for their scene |
 | `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts, `isPublic` and `shareToken` |
 | `GET /api/sessions/{sessionId}/replay` | The compiled replay file (gzip-encoded) |
@@ -437,7 +444,8 @@ everything is keyed by the project's ID (`{projectId:N}` is the GUID without das
 
 ```
 {ScenesDir}/{projectId:N}/{sceneId}/{hash}/      one scene version: the uploaded GLB,
-                                                 registry.json, optimized.glb
+                                                 registry.json, optimized.glb,
+                                                 optimized.glb.gz
 {SessionsDir}/{projectId:N}/{sessionId:N}/       one session: raw.mblog, replay.mbr.gz
 ```
 
@@ -451,8 +459,10 @@ everything is keyed by the project's ID (`{projectId:N}` is the GUID without das
     session row.
   - `SessionCompiler.Version` (now 3) is stored on each session as `compilerVersion`; recompile
     older sessions to update them.
-- **Database:** one `Initial` EF Core migration, applied at startup. Dumps from before it was
-  squashed do not restore onto it; use `./deploy.sh wipe` for a clean start.
+- **Database:** three EF Core migrations, `Initial`, `SessionSharing` (public share links) and
+  `OptimizedGzipSize`,
+  applied at startup. Dumps from before `Initial` was squashed do not restore onto it; use
+  `./deploy.sh wipe` for a clean start.
 
 ## Project layout
 
@@ -465,7 +475,7 @@ src/MoodyBlues.Backend/
   Data/                      EF Core entities and context (User, Project, Scene, SceneRevision,
                              Session, refresh tokens, audit events), IngestAccess (key lookup,
                              connection string), IngestKeyProtector, StorageQuota, AuditLog
-  Migrations/                the Initial EF Core migration (applied at startup)
+  Migrations/                the EF Core migrations (Initial, SessionSharing, OptimizedGzipSize), applied at startup
   Auth/                      registration, login, refresh tokens, cookies and CSRF check, JWT,
                              password hashing
   Projects/                  /api/projects; ProjectAccess (the "project owned by the caller,

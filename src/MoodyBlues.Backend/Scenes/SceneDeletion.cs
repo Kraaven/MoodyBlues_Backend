@@ -55,7 +55,7 @@ public static class SceneDeletion
         }
 
         long bytes = sessions.Sum(s => s.RawLogSizeBytes + s.ReplaySizeBytes) +
-                     revisions.Sum(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0));
+                     revisions.Sum(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0) + (r.OptimizedGzipSizeBytes ?? 0));
 
         db.Sessions.RemoveRange(sessions);
         db.SceneRevisions.RemoveRange(revisions);

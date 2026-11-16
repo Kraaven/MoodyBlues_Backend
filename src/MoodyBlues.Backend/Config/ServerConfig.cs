@@ -80,11 +80,11 @@ public sealed class ServerConfig
     /// <summary>One compile is cancelled after this long, so a pathological log cannot stall the worker.</summary>
     public TimeSpan CompileTimeout { get; init; } = TimeSpan.FromMinutes(10);
 
-    /// <summary>Heap limit for the gltf-transform (Node) process that optimizes uploaded scenes.</summary>
+    /// <summary>Heap limit for the optimizer (Node) process that optimizes uploaded scenes.</summary>
     public int OptimizerMemoryLimitMb { get; init; } = 2048;
 
-    /// <summary>Executable for the scene optimization pass (the pinned <c>@gltf-transform/cli</c> in the Docker image).</summary>
-    public string GltfTransformCommand { get; init; } = "gltf-transform";
+    /// <summary>The scene optimization script run with <c>node</c> (<c>tools/optimize-scene</c>, installed in the Docker image).</summary>
+    public string OptimizerScript { get; init; } = "/opt/optimize-scene/optimize-scene.mjs";
 
     /// <summary>JWT signing secret. The default is insecure; Program.cs warns when it is in use.</summary>
     public string JwtSecret { get; init; } = InsecureDefaultJwtSecret;
@@ -143,7 +143,7 @@ public sealed class ServerConfig
             MaxStoragePerProjectBytes = TryParseInt(Env("MOODYBLUES_MAX_STORAGE_GB"), 20) * 1024L * 1024L * 1024L,
             CompileTimeout = TimeSpan.FromMinutes(Math.Max(1, TryParseInt(Env("MOODYBLUES_COMPILE_TIMEOUT_MINUTES"), 10))),
             OptimizerMemoryLimitMb = Math.Max(256, TryParseInt(Env("MOODYBLUES_OPTIMIZER_MEMORY_MB"), 2048)),
-            GltfTransformCommand = Env("MOODYBLUES_GLTF_TRANSFORM_CMD") ?? "gltf-transform",
+            OptimizerScript = Env("MOODYBLUES_OPTIMIZER_SCRIPT") ?? "/opt/optimize-scene/optimize-scene.mjs",
             JwtSecret = Env("MOODYBLUES_JWT_SECRET") ?? InsecureDefaultJwtSecret,
             CorsOrigins = ParseCorsOrigins(Env("MOODYBLUES_CORS_ORIGIN")),
             AccessTokenLifetime = TimeSpan.FromMinutes(Math.Clamp(TryParseInt(Env("MOODYBLUES_ACCESS_TOKEN_MINUTES"), 15), 1, 24 * 60)),

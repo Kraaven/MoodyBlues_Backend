@@ -183,6 +183,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("OptimizedGlbPath")
                         .HasColumnType("text");
 
+                    b.Property<long?>("OptimizedGzipSizeBytes")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("OptimizedSizeBytes")
                         .HasColumnType("bigint");
 

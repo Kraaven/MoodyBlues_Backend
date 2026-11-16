@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Net.Http.Headers;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Data;
@@ -19,6 +21,9 @@ namespace MoodyBlues.Backend.Scenes;
 /// </summary>
 public static class SceneEndpoints
 {
+    /// <summary>Size of the GLB after any Content-Encoding is removed; listed in the CORS policy so the dashboard can read it.</summary>
+    public const string DecodedLengthHeader = "X-MoodyBlues-Decoded-Length";
+
     public static void Map(WebApplication app)
     {
         var group = app.MapGroup("/api/projects/{projectId:guid}/scenes/{sceneId}").RequireAuthorization();
@@ -170,7 +175,11 @@ public static class SceneEndpoints
         return await ServeRevisionAsync(projectId, sceneId, revisionHash, db, paths, httpContext);
     }
 
-    /// <summary>Streams one revision's GLB (no ownership check: callers authorize first); shared with the public share route.</summary>
+    /// <summary>
+    /// Streams one revision's GLB (no ownership check: callers authorize first); shared with the
+    /// public share route. The optimized file goes out as its pre-gzipped copy when the client
+    /// accepts gzip.
+    /// </summary>
     internal static async Task<IResult> ServeRevisionAsync(
         Guid projectId,
         string sceneId,
@@ -196,15 +205,38 @@ public static class SceneEndpoints
             return Results.NotFound("Scene file is not on disk.");
         }
 
-        // Only cache once the optimized file is being served; before that the response changes.
-        if (optimized is not null && fullPath == optimized)
+        httpContext.Response.Headers[DecodedLengthHeader] = new FileInfo(fullPath).Length.ToString(CultureInfo.InvariantCulture);
+        bool isOptimized = optimized is not null && fullPath == optimized;
+        if (!isOptimized)
         {
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
         }
 
-        // Results.File needs an absolute path (a relative one is resolved against wwwroot).
-        return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
+        // Only cache once the optimized file is being served; before that the response changes.
+        httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+
+        string gzipPath = Path.Combine(Path.GetDirectoryName(fullPath)!, StoragePaths.OptimizedGlbGzipFile);
+        if (!File.Exists(gzipPath))
+        {
+            return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
+        }
+
+        httpContext.Response.Headers.Append(HeaderNames.Vary, HeaderNames.AcceptEncoding);
+        if (!AcceptsGzip(httpContext.Request))
+        {
+            return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
+        }
+
+        // The pre-gzipped copy, like the replay file: the browser decodes it, so the viewer still
+        // reads plain GLB bytes. Content-Length is the gzip size, hence DecodedLengthHeader. A byte
+        // range into the compressed bytes means nothing to the client, so none is offered.
+        httpContext.Response.Headers.ContentEncoding = "gzip";
+        return Results.File(gzipPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: false);
     }
+
+    private static bool AcceptsGzip(HttpRequest request) =>
+        request.GetTypedHeaders().AcceptEncoding.Any(e =>
+            string.Equals(e.Value.Value, "gzip", StringComparison.OrdinalIgnoreCase) && e.Quality != 0);
 
     /// <summary>
     /// The list/summary form of a scene. Takes its current revision so a project's scenes can be
@@ -252,7 +284,7 @@ public static class SceneEndpoints
 
         var known = revisions.Select(r => r.Hash).ToHashSet(StringComparer.Ordinal);
         int awaiting = sessionStats.Where(s => !known.Contains(s.Hash)).Sum(s => s.Count);
-        long total = revisions.Sum(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0)) + sessionStats.Sum(s => s.Bytes);
+        long total = revisions.Sum(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0) + (r.OptimizedGzipSizeBytes ?? 0)) + sessionStats.Sum(s => s.Bytes);
 
         SceneRevision? current = revisions.FirstOrDefault(r => r.Hash == scene.LatestHash);
         return new SceneDetailResponse(

@@ -9,7 +9,7 @@ public static class StorageQuota
     {
         long scenes = await db.SceneRevisions
             .Where(r => r.ProjectId == projectId)
-            .SumAsync(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0));
+            .SumAsync(r => r.RawSizeBytes + (r.OptimizedSizeBytes ?? 0) + (r.OptimizedGzipSizeBytes ?? 0));
 
         long sessions = await db.Sessions
             .Where(s => s.ProjectId == projectId)

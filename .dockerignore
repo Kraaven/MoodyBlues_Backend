@@ -9,3 +9,4 @@ scenes/
 .env
 *.user
 *.suo
+**/node_modules/

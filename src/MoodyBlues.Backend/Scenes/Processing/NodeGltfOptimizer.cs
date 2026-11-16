@@ -5,39 +5,21 @@ using MoodyBlues.Backend.Logging;
 namespace MoodyBlues.Backend.Scenes.Processing;
 
 /// <summary>
-/// Runs <c>gltf-transform optimize</c> (version pinned in the Dockerfile) to make an uploaded scene
-/// smaller for the dashboard: Draco geometry and KTX2 textures, matching the decoders the
-/// frontend registers in <c>loadScene.ts</c>.
+/// Runs <c>tools/optimize-scene/optimize-scene.mjs</c> (dependencies pinned in its package.json,
+/// installed by the Dockerfile) to make an uploaded scene smaller for the dashboard: meshopt
+/// geometry and KTX2 textures, matching the decoders the frontend registers in <c>loadScene.ts</c>.
 ///
-/// Every step that would change the node hierarchy is switched off, because replays address
-/// nodes through <c>extras.objectId</c> and animate them individually:
-/// <list type="bullet">
-/// <item><c>--instance false</c>: GPU instancing moves meshes off their nodes into one static batch
-///   (for any mesh used 5+ times) and deletes the emptied nodes.</item>
-/// <item><c>--prune false</c>: pruning deletes empty leaf nodes, which tracked empty GameObjects are.</item>
-/// <item><c>--flatten false</c>, <c>--join false</c>: both destroy the hierarchy.</item>
-/// <item><c>--palette false</c>, <c>--simplify false</c>: keep materials and geometry as authored,
-///   since the inspector shows them.</item>
-/// </list>
+/// The script leaves the node hierarchy, node transforms and every node's extras alone, because
+/// replays address nodes through <c>extras.objectId</c> and animate them individually; see the
+/// header of the script for what it deliberately does not do.
 /// The process has a timeout so one pathological upload cannot stall the queue forever.
 /// </summary>
-public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
+public sealed class NodeGltfOptimizer(ServerConfig config) : IGltfOptimizer
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(15);
 
-    public static IReadOnlyList<string> BuildArguments(string inputPath, string outputPath) =>
-    [
-        "optimize", inputPath, outputPath,
-        "--compress", "draco",
-        "--texture-compress", "ktx2",
-        "--texture-size", "2048",
-        "--instance", "false",
-        "--prune", "false",
-        "--flatten", "false",
-        "--join", "false",
-        "--palette", "false",
-        "--simplify", "false",
-    ];
+    public static IReadOnlyList<string> BuildArguments(string scriptPath, string inputPath, string outputPath) =>
+        [scriptPath, inputPath, outputPath];
 
     public async Task<bool> OptimizeAsync(string inputPath, string outputPath, CancellationToken cancellationToken)
     {
@@ -49,7 +31,7 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = config.GltfTransformCommand,
+            FileName = "node",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -57,7 +39,7 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
 
         // The GLB is untrusted input; cap the Node heap so one upload cannot take the whole host.
         startInfo.Environment["NODE_OPTIONS"] = $"--max-old-space-size={config.OptimizerMemoryLimitMb}";
-        foreach (string arg in BuildArguments(inputPath, outputPath))
+        foreach (string arg in BuildArguments(config.OptimizerScript, inputPath, outputPath))
         {
             startInfo.ArgumentList.Add(arg);
         }
@@ -79,7 +61,7 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 process.Kill(entireProcessTree: true);
-                ConsoleLog.Error($"Scene processing: gltf-transform timed out after {Timeout.TotalMinutes} min for {inputPath}.");
+                ConsoleLog.Error($"Scene processing: scene optimizer timed out after {Timeout.TotalMinutes} min for {inputPath}.");
                 return false;
             }
             catch (OperationCanceledException)
@@ -92,7 +74,7 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
             if (process.ExitCode != 0)
             {
                 ConsoleLog.Error(
-                    $"Scene processing: gltf-transform exited {process.ExitCode} for {inputPath}."
+                    $"Scene processing: scene optimizer exited {process.ExitCode} for {inputPath}."
                     + $"{Environment.NewLine}stdout: {await stdOut}{Environment.NewLine}stderr: {await stdErr}");
                 return false;
             }
@@ -101,7 +83,7 @@ public sealed class GltfTransformOptimizer(ServerConfig config) : IGltfOptimizer
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ConsoleLog.Error($"Scene processing: failed to run gltf-transform for {inputPath}.", ex);
+            ConsoleLog.Error($"Scene processing: failed to run the scene optimizer for {inputPath}.", ex);
             return false;
         }
     }

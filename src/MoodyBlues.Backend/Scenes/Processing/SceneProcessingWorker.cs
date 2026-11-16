@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -17,7 +18,7 @@ namespace MoodyBlues.Backend.Scenes.Processing;
 /// <list type="number">
 /// <item>Build the object registry from the raw GLB. This is fast and is all the session compiler
 ///   needs, so it is done first and signals the compile worker straight away.</item>
-/// <item>Optimize the GLB for the dashboard. Slow (texture compression); failure only means the
+/// <item>Optimize the GLB for the dashboard. Slow (texture compression), and followed by writing a gzipped copy of its output; failure only means the
 ///   raw file is served instead.</item>
 /// </list>
 /// </summary>
@@ -151,6 +152,7 @@ public sealed class SceneProcessingWorker(
         {
             revision.OptimizedGlbPath = optimizedRelative;
             revision.OptimizedSizeBytes = new FileInfo(optimizedFull).Length;
+            revision.OptimizedGzipSizeBytes = await TryWriteGzipAsync(optimizedFull, label, cancellationToken);
             revision.Status = SceneProcessingStatus.Ready;
             revision.ErrorMessage = null;
             ConsoleLog.Info($"Scene processing: {label} optimized ({revision.RawSizeBytes} -> {revision.OptimizedSizeBytes} bytes).");
@@ -163,5 +165,30 @@ public sealed class SceneProcessingWorker(
         }
 
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes the gzipped copy the file endpoint serves to clients that accept gzip, so the
+    /// compression cost is paid once here instead of on every download. Failure is not fatal: the
+    /// endpoint falls back to the plain optimized file.
+    /// </summary>
+    private static async Task<long?> TryWriteGzipAsync(string optimizedFull, string label, CancellationToken cancellationToken)
+    {
+        string gzipFull = Path.Combine(Path.GetDirectoryName(optimizedFull)!, StoragePaths.OptimizedGlbGzipFile);
+        try
+        {
+            await StoragePaths.WriteAtomicAsync(gzipFull, async output =>
+            {
+                await using var gzip = new GZipStream(output, CompressionLevel.SmallestSize, leaveOpen: true);
+                await using var input = File.OpenRead(optimizedFull);
+                await input.CopyToAsync(gzip, cancellationToken);
+            }, cancellationToken);
+            return new FileInfo(gzipFull).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ConsoleLog.Warn($"Scene processing: {label} could not write the gzip copy: {ex.Message}");
+            return null;
+        }
     }
 }

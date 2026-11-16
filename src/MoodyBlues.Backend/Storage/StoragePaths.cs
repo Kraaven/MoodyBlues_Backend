@@ -10,6 +10,7 @@ namespace MoodyBlues.Backend.Storage;
 public sealed class StoragePaths(ServerConfig config)
 {
     public const string OptimizedGlbFile = "optimized.glb";
+    public const string OptimizedGlbGzipFile = "optimized.glb.gz";
     public const string RegistryFile = "registry.json";
     public const string RawLogFile = "raw.mblog";
     public const string ReplayFile = "replay.mbr.gz";

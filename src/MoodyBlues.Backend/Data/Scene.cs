@@ -70,6 +70,12 @@ public sealed class SceneRevision
 
     public long? OptimizedSizeBytes { get; set; }
 
+    /// <summary>
+    /// Size of the pre-gzipped copy of the optimized GLB (<see cref="StoragePaths.OptimizedGlbGzipFile"/>, next to it),
+    /// counted against the project's storage. Null when it was not written; the endpoint then serves the plain file.
+    /// </summary>
+    public long? OptimizedGzipSizeBytes { get; set; }
+
     /// <summary>Path relative to ScenesDir of the object registry JSON the session compiler reads.</summary>
     public string? RegistryPath { get; set; }
 

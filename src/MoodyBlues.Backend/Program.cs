@@ -48,7 +48,7 @@ builder.Services.AddSingleton<CompileWorkSignal>();
 builder.Services.AddSingleton<StreamServer>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton<IngestKeyProtector>();
-builder.Services.AddScoped<IGltfOptimizer, GltfTransformOptimizer>();
+builder.Services.AddScoped<IGltfOptimizer, NodeGltfOptimizer>();
 builder.Services.AddHostedService<SceneProcessingWorker>();
 builder.Services.AddHostedService<CompileWorker>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
@@ -63,6 +63,8 @@ builder.Services.AddCors(options => options.AddPolicy("dashboard", policy => pol
     .WithOrigins(config.CorsOrigins)
     .AllowAnyHeader()
     .AllowAnyMethod()
+    // Readable by the viewer, which sizes its download progress from it (see SceneEndpoints.ServeRevisionAsync).
+    .WithExposedHeaders(SceneEndpoints.DecodedLengthHeader)
     // The dashboard signs in with httpOnly cookies, so its requests carry credentials.
     .AllowCredentials()));
 
