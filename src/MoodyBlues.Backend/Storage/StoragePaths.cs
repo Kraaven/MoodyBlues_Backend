@@ -13,7 +13,8 @@ public sealed class StoragePaths(ServerConfig config)
     public const string OptimizedGlbGzipFile = "optimized.glb.gz";
     public const string RegistryFile = "registry.json";
     public const string RawLogFile = "raw.mblog";
-    public const string ReplayFile = "replay.mbr.gz";
+    public const string RawLogCompressedFile = "raw.mblog.br";
+    public const string ReplayFile = "replay.mbr.br";
 
     public static string SceneRevisionDir(Guid projectId, string sceneId, string hash) =>
         Path.Combine(projectId.ToString("N"), sceneId, hash);

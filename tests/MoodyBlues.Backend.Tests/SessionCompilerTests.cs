@@ -45,13 +45,13 @@ public class SessionCompilerTests : IDisposable
             }
         }
 
-        string replayPath = Path.Combine(_dir, "replay.mbr.gz");
+        string replayPath = Path.Combine(_dir, StoragePaths.ReplayFile);
         await SessionCompiler.CompileAsync(rawPath, registry, replayPath);
 
         await using var file = File.OpenRead(replayPath);
-        await using var gzip = new GZipStream(file, CompressionMode.Decompress);
+        await using var brotli = new BrotliStream(file, CompressionMode.Decompress);
         using var ms = new MemoryStream();
-        await gzip.CopyToAsync(ms);
+        await brotli.CopyToAsync(ms);
         return ReplayFileReader.Parse(ms.ToArray());
     }
 
@@ -76,7 +76,7 @@ public class SessionCompilerTests : IDisposable
         wire.EndSession();
         ReplayFileReader replay = await CompileAsync(registry, wire.Build());
 
-        float tolerance = FitTolerances.Default.SurfaceDistance + (FitTolerances.Default.QuantizationAllowance * WireRanges.Default.DeltaPositionStep);
+        float tolerance = FitTolerances.Default.SurfaceDistance + (FitTolerances.Default.QuantizationAllowance * WireRanges.Default.DeltaPositionError);
         foreach ((double t, Vector3 expected) in truth)
         {
             Vector3 got = replay.Position(1, t);
@@ -180,7 +180,7 @@ public class SessionCompilerTests : IDisposable
     }
 
     [Fact]
-    public async Task LongSession_SplitsIntoBlocks_ThatConcatenateSeamlessly()
+    public async Task LongSession_IsOneContinuousTrackPerChannel()
     {
         var registry = new SceneRegistry { Objects = [Reg(1, Vector3.Zero), Reg(2, Vector3.Zero)] };
         var wire = new WireBuilder().BeginSession().Time(0).KeepAlive();
@@ -197,10 +197,9 @@ public class SessionCompilerTests : IDisposable
 
         ReplayFileReader replay = await CompileAsync(registry, wire.EndSession().Build());
 
-        Assert.Equal(3, replay.BlockCount);
-        // Object 1 stopped moving in block 0 but must keep its final pose in later blocks.
+        // Object 1 stopped moving after 30 s but must keep its final pose to the end.
         Assert.True(Vector3.Distance(replay.Position(1, 140), replay.Position(1, 31)) < 1e-5f);
-        // Object 2's curve evaluates continuously across the block boundaries.
+        // Object 2's curve evaluates continuously through the session (the old block boundaries).
         foreach (double t in new[] { 59.99, 60.0, 60.01, 119.99, 120.0, 120.01 })
         {
             var expected = new Vector3(-(float)Math.Sin(t * 0.3) * 4, 0, (float)Math.Cos(t * 0.3) * 4);

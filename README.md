@@ -279,9 +279,9 @@ The upload is processed in the background (`Scenes/Processing/`):
 - **Auth:** the handshake's stream token, in the `X-MoodyBlues-Stream-Token` header of the
   upgrade request. It is not accepted in the URL, so it stays out of proxy and access logs.
   Only its hash is stored. Reconnects of the same recording send the same token.
-- **Messages:** binary only, each a run of whole events (protocol v3 only; see `Spec.md`). A
+- **Messages:** binary only, each a run of whole events (protocol v4 only; see `Spec.md`). A
   message that doesn't decode is recorded as a data gap.
-- **Refused connections:** any protocol version other than 3, or a connection that doesn't start
+- **Refused connections:** any protocol version other than 4, or a connection that doesn't start
   with `BeginSession`, is refused.
 - **Message size:** messages up to 160 KB are accepted; the client's largest setting is 128 KB.
 
@@ -338,11 +338,11 @@ names, for example `"Ready"`.
 | `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version. The optimized file is sent as its pre-gzipped copy (`Content-Encoding: gzip`, `Vary: Accept-Encoding`, no byte ranges) when the request accepts gzip. Every response carries `X-MoodyBlues-Decoded-Length` (the GLB size after decoding; CORS-exposed), since `Content-Length` is the gzip size. The same goes for `GET /api/share/{token}/scene` |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/sessions` | Sessions, newest first. `?version=n` filters to one version (404 if it does not exist); `?awaitingScene=true` to sessions waiting for their scene |
 | `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts, `isPublic` and `shareToken` |
-| `GET /api/sessions/{sessionId}/replay` | The compiled replay file (gzip-encoded) |
+| `GET /api/sessions/{sessionId}/replay` | The compiled replay file, stored brotli-compressed: sent as is with `Content-Encoding: br` when the request accepts br, otherwise decompressed on the fly. `Vary: Accept-Encoding`; `X-MoodyBlues-Decoded-Length` carries the decoded size (CORS-exposed) |
 | `PUT /api/sessions/{sessionId}/sharing` | `{ "isPublic": bool }` turns the public link on or off: `{ isPublic, shareToken }`. The token is created the first time it goes public and kept while private |
 | `POST /api/sessions/{sessionId}/sharing/reset` | Issue a new share token (the old link stops working): `{ isPublic, shareToken }` |
 | `GET /api/share/{token}` | Anonymous (rate limited, 404 unless the session is public): `{ session, projectName, sceneName, sceneVersion }` |
-| `GET /api/share/{token}/replay` | Anonymous: the session's replay file (gzip-encoded) |
+| `GET /api/share/{token}/replay` | Anonymous: the session's replay file, served like the owner route above |
 | `GET /api/share/{token}/scene` | Anonymous: the GLB of the version the session was recorded in |
 | `POST /api/sessions/{sessionId}/recompile` | Rebuild the replay from the raw log |
 | `DELETE /api/sessions/{sessionId}` | Delete one session (not while recording or compiling) |
@@ -359,7 +359,7 @@ client reports in `EndSession`: `deltaPromotions`, `rotationWidenings`, `hardCla
 `droppedEvents`.
 
 **`activity`** is the session's glyph, computed by the compiler (`Compiler/SessionActivity.cs`,
-`SessionCompiler.Version` 3) and stored as JSON on the session. It is null until the session is
+`SessionCompiler.Version` 4) and stored as JSON on the session. It is null until the session is
 Ready. Every position is a fraction of the session's duration, 0 to 1, rounded to 4 decimals:
 
 ```json
@@ -446,21 +446,33 @@ everything is keyed by the project's ID (`{projectId:N}` is the GUID without das
 {ScenesDir}/{projectId:N}/{sceneId}/{hash}/      one scene version: the uploaded GLB,
                                                  registry.json, optimized.glb,
                                                  optimized.glb.gz
-{SessionsDir}/{projectId:N}/{sessionId:N}/       one session: raw.mblog, replay.mbr.gz
+{SessionsDir}/{projectId:N}/{sessionId:N}/       one session: raw.mblog (raw.mblog.br once
+                                                 compiled), replay.mbr.br
 ```
 
 - **Raw log** (`raw.mblog`): the 8-byte magic `MBRAWv02`, then records
   `[u8 kind][u32 length][i64 receivedUnixMs][u32 connection][payload]`. It is the only format
-  read.
-- **Replay file** (`replay.mbr.gz`): format 2, documented in `Compiler/ReplayFileWriter.cs`.
+  read. It is appended to while the session records; after a successful compile the worker
+  stores it brotli-compressed as `raw.mblog.br`, removes the plain file and updates
+  the session row (path and size). Recompiles read either form (by extension). A sealed
+  session never accepts a connection again, so the writer only ever sees the plain file.
+- **Replay file** (`replay.mbr.br`): format 3, brotli-compressed (quality 11), documented in
+  `Compiler/ReplayFileWriter.cs`: a header and object/event/log tables, then one section of
+  varint-coded tracks (times, values and segment-scaled tangents on integer grids) covering the whole session.
+  The session row keeps the stored size (`replaySizeBytes`) and the decoded size, which is what
+  `X-MoodyBlues-Decoded-Length` reports.
+  - The fitter's tolerance is the surface distance plus `QuantizationAllowance` (default 1.0)
+    times the wire's worst-case per-sample error (half a quantization step on each axis, as a
+    vector; for rotation, sqrt(3) x the component step as an angle), so it does not key
+    quantization noise.
   - Object kinds are 0 scene, 1 spawned, and 2 spawned part: a child of a spawned object that the
     viewer animates inside the clone.
   - The header does not carry the session's activity or counters; those are columns on the
     session row.
-  - `SessionCompiler.Version` (now 3) is stored on each session as `compilerVersion`; recompile
-    older sessions to update them.
-- **Database:** three EF Core migrations, `Initial`, `SessionSharing` (public share links) and
-  `OptimizedGzipSize`,
+  - `SessionCompiler.Version` (now 4) is stored on each session as `compilerVersion`; recompile
+    older sessions to update them (replay format 2 files from before format 3 are not readable and must be recompiled).
+- **Database:** four EF Core migrations, `Initial`, `SessionSharing` (public share links),
+  `OptimizedGzipSize` and `SessionReplayDecodedSize`,
   applied at startup. Dumps from before `Initial` was squashed do not restore onto it; use
   `./deploy.sh wipe` for a clean start.
 
@@ -475,7 +487,7 @@ src/MoodyBlues.Backend/
   Data/                      EF Core entities and context (User, Project, Scene, SceneRevision,
                              Session, refresh tokens, audit events), IngestAccess (key lookup,
                              connection string), IngestKeyProtector, StorageQuota, AuditLog
-  Migrations/                the EF Core migrations (Initial, SessionSharing, OptimizedGzipSize), applied at startup
+  Migrations/                the EF Core migrations (Initial, SessionSharing, OptimizedGzipSize, SessionReplayDecodedSize), applied at startup
   Auth/                      registration, login, refresh tokens, cookies and CSRF check, JWT,
                              password hashing
   Projects/                  /api/projects; ProjectAccess (the "project owned by the caller,
@@ -489,7 +501,7 @@ src/MoodyBlues.Backend/
   Sessions/                  dashboard session routes
   Compiler/                  raw log -> replay: reconstruction, curve fitting, replay file writer,
                              SessionActivity (the glyph), coordinate conversion, worker
-  Protocol/                  wire decoder (v3), event types, dequantization
+  Protocol/                  wire decoder (v4), event types, dequantization (symmetric signed quantizers)
   Storage/                   file locations, raw log reader/writer
   Logging/                   console logging, exception handling
 tests/MoodyBlues.Backend.Tests/   xUnit tests (EF Core InMemory, endpoint handlers called directly)

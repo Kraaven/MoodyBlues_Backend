@@ -17,10 +17,12 @@ public sealed record FitTolerances
     public float SurfaceDistance { get; init; } = 0.001f;
 
     /// <summary>
-    /// Extra allowance as a fraction of the wire's own quantization step, so the fitter does not
-    /// spend keys reproducing noise the wire already introduced.
+    /// Extra allowance as a fraction of the wire's worst-case per-sample quantization error
+    /// (<see cref="WireRanges.DeltaPositionError"/> and friends), added to the tolerance in the
+    /// same units (distance, radians) so the fitter does not spend keys reproducing noise the
+    /// wire already introduced.
     /// </summary>
-    public float QuantizationAllowance { get; init; } = 0.5f;
+    public float QuantizationAllowance { get; init; } = 1f;
 
     /// <summary>Radius used when an object has no geometry information.</summary>
     public float FallbackRadius { get; init; } = 1f;
@@ -607,13 +609,13 @@ public sealed class SessionReconstructor : IWireEventSink
 
         ChannelFitter fitter = channel switch
         {
-            ReplayChannel.Position => new ChannelFitter(3, false, surface + (allowance * _ranges.DeltaPositionStep), _tick),
+            ReplayChannel.Position => new ChannelFitter(3, false, surface + (allowance * _ranges.DeltaPositionError), _tick),
             ReplayChannel.Rotation => new ChannelFitter(
                 4,
                 true,
-                Math.Clamp(surface / radius, 1e-4f, 0.02f) + (allowance * _ranges.DeltaRotationComponentStep),
+                Math.Clamp(surface / radius, 1e-4f, 0.02f) + (allowance * _ranges.DeltaRotationAngleError),
                 _tick),
-            _ => new ChannelFitter(3, false, Math.Clamp(surface / radius, 1e-4f, 0.01f) + (allowance * _ranges.DeltaScaleStep), _tick),
+            _ => new ChannelFitter(3, false, Math.Clamp(surface / radius, 1e-4f, 0.01f) + (allowance * _ranges.DeltaScaleError), _tick),
         };
 
         if (o.Kind == ReplayObjectKind.Scene && _now > 0)

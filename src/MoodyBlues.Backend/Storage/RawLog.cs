@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Text;
 
 namespace MoodyBlues.Backend.Storage;
@@ -42,6 +43,11 @@ public readonly record struct RawLogRecord(RawLogRecordKind Kind, long ReceivedU
 /// reconnects before the server notices its old connection died has two open at once, and their
 /// records interleave. No other format is read. A crash can leave a truncated final record;
 /// <see cref="RawLogReader"/> ignores it.
+///
+/// While a session records, the log is the plain file (<c>raw.mblog</c>). Once the session has
+/// compiled, <see cref="RawLogCompression"/> replaces it with the same bytes brotli-compressed
+/// (<c>raw.mblog.br</c>); a sealed session is never appended to again, so only the reader ever sees
+/// the compressed form.
 /// </summary>
 public static class RawLogFormat
 {
@@ -188,12 +194,37 @@ public sealed class RawLogWriterRegistry
     }
 }
 
-/// <summary>Reads a raw log sequentially, tolerating a truncated final record.</summary>
+/// <summary>Moves a sealed session's raw log to its compressed form.</summary>
+public static class RawLogCompression
+{
+    public static bool IsCompressed(string path) =>
+        path.EndsWith(".br", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Writes <paramref name="compressedFullPath"/> from the plain log (atomically) and returns its
+    /// size. The plain file is left for the caller to delete once the new path is recorded, so a
+    /// failure at any point leaves a readable log. Fast brotli level: logs are large and this runs
+    /// on the server that is also compiling and ingesting.
+    /// </summary>
+    public static async Task<long> CompressAsync(string plainFullPath, string compressedFullPath, CancellationToken cancellationToken)
+    {
+        await StoragePaths.WriteAtomicAsync(compressedFullPath, async destination =>
+        {
+            await using var brotli = new BrotliStream(destination, CompressionLevel.Optimal, leaveOpen: true);
+            await using var source = new FileStream(plainFullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+            await source.CopyToAsync(brotli, cancellationToken);
+        }, cancellationToken);
+        return new FileInfo(compressedFullPath).Length;
+    }
+}
+
+/// <summary>Reads a raw log (plain or brotli-compressed, by file extension) sequentially, tolerating a truncated final record.</summary>
 public static class RawLogReader
 {
     public static IEnumerable<RawLogRecord> Read(string fullPath)
     {
-        using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+        using var file = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+        using Stream stream = RawLogCompression.IsCompressed(fullPath) ? new BrotliStream(file, CompressionMode.Decompress) : file;
         foreach (RawLogRecord record in Read(stream))
         {
             yield return record;

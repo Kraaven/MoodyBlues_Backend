@@ -6,8 +6,8 @@ namespace MoodyBlues.Backend.Tests;
 
 /// <summary>
 /// Test-side reader and evaluator for the replay file format, written independently from
-/// <see cref="ReplayFileWriter"/> against its documented layout. It concatenates blocks the way the
-/// frontend does (dropping lead-in keys) and evaluates Hermite curves the way three.js's
+/// <see cref="ReplayFileWriter"/> against its documented layout (format 3). It decodes varints with
+/// arithmetic, like a JavaScript reader has to, and evaluates Hermite curves the way three.js's
 /// BezierInterpolant does with control points at one third.
 /// </summary>
 public sealed class ReplayFileReader
@@ -27,8 +27,7 @@ public sealed class ReplayFileReader
 
     public ushort Flags { get; private set; }
     public double Duration { get; private set; }
-    public float BlockDuration { get; private set; }
-    public int BlockCount { get; private set; }
+    public int TrackCount { get; private set; }
     public uint TotalKeys { get; private set; }
     public uint HardClamps { get; private set; }
     public byte EndReason { get; private set; }
@@ -49,13 +48,13 @@ public sealed class ReplayFileReader
         Assert.Equal(ReplayFileWriter.FormatVersion, BinaryPrimitives.ReadUInt16LittleEndian(d[4..]));
         r.Flags = BinaryPrimitives.ReadUInt16LittleEndian(d[6..]);
         r.Duration = BinaryPrimitives.ReadDoubleLittleEndian(d[8..]);
-        r.BlockDuration = BinaryPrimitives.ReadSingleLittleEndian(d[16..]);
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(d[16..]));
         int objectCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[20..]);
         int eventCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[24..]);
-        r.BlockCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[28..]);
+        r.TrackCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[28..]);
         int objectOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[32..]);
         int eventOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[36..]);
-        int blockIndexOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[40..]);
+        int trackDataOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(d[40..]);
         r.TotalKeys = BinaryPrimitives.ReadUInt32LittleEndian(d[44..]);
         r.HardClamps = BinaryPrimitives.ReadUInt32LittleEndian(d[52..]);
         r.EndReason = d[60];
@@ -86,49 +85,100 @@ public sealed class ReplayFileReader
                 BinaryPrimitives.ReadUInt16LittleEndian(e[14..])));
         }
 
-        for (int b = 0; b < r.BlockCount; b++)
+        Assert.Equal(0, trackDataOffset % 4);
+        int p = trackDataOffset;
+        (ushort Id, ReplayChannel Channel)? previous = null;
+        for (int t = 0; t < r.TrackCount; t++)
         {
-            ReadOnlySpan<byte> idx = d.Slice(blockIndexOffset + (b * 16), 16);
-            double start = BinaryPrimitives.ReadDoubleLittleEndian(idx);
-            int offset = (int)BinaryPrimitives.ReadUInt32LittleEndian(idx[8..]);
-            int length = (int)BinaryPrimitives.ReadUInt32LittleEndian(idx[12..]);
-            ReadOnlySpan<byte> block = d.Slice(offset, length);
-            Assert.Equal(0, offset % 4);
-            int trackCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(block);
-            int p = 8;
-            for (int t = 0; t < trackCount; t++)
+            ushort id = (ushort)ReadVarint(d, ref p);
+            var channel = (ReplayChannel)d[p++];
+            if (previous is { } prev)
             {
-                ushort id = BinaryPrimitives.ReadUInt16LittleEndian(block[p..]);
-                var channel = (ReplayChannel)block[p + 2];
-                bool leadIn = (block[p + 3] & 1) != 0;
-                int keys = (int)BinaryPrimitives.ReadUInt32LittleEndian(block[(p + 4)..]);
-                p += 8;
-                int dim = channel == ReplayChannel.Rotation ? 4 : 3;
-                if (!r.Tracks.TryGetValue((id, channel), out Track? track))
-                {
-                    track = new Track { Dim = dim };
-                    r.Tracks[(id, channel)] = track;
-                }
+                Assert.True((id, channel).CompareTo(prev) > 0, "tracks must ascend by (objectId, channel)");
+            }
 
-                int timesAt = p;
-                int valuesAt = timesAt + (keys * 4);
-                int inAt = valuesAt + (keys * dim * 4);
-                int outAt = inAt + (keys * dim * 4);
-                p = outAt + (keys * dim * 4);
-                for (int k = leadIn ? 1 : 0; k < keys; k++)
+            previous = (id, channel);
+            int keys = (int)ReadVarint(d, ref p);
+            Assert.True(keys >= 1);
+            int dim = channel == ReplayChannel.Rotation ? 4 : 3;
+            bool rotation = channel == ReplayChannel.Rotation;
+            double valueGrid = rotation ? ReplayFileWriter.RotationGrid : ReplayFileWriter.PositionScaleGrid;
+            var track = new Track { Dim = dim };
+
+            long acc = 0;
+            for (int k = 0; k < keys; k++)
+            {
+                acc += ReadZigzag(d, ref p);
+                track.Times.Add(acc / ReplayFileWriter.TimeGrid);
+            }
+
+            var values = new float[keys * dim];
+            for (int c = 0; c < dim; c++)
+            {
+                acc = 0;
+                for (int k = 0; k < keys; k++)
                 {
-                    track.Times.Add(start + BinaryPrimitives.ReadSingleLittleEndian(block[(timesAt + (k * 4))..]));
-                    for (int c = 0; c < dim; c++)
+                    acc += ReadZigzag(d, ref p);
+                    values[(k * dim) + c] = (float)(acc / valueGrid);
+                }
+            }
+
+            // Tangents are stored as m * dt on the value grid; the first in and last out are absent (0).
+            var inTan = new float[keys * dim];
+            var outTan = new float[keys * dim];
+            for (int c = 0; c < dim; c++)
+            {
+                for (int k = 0; k < keys; k++)
+                {
+                    if (k > 0)
                     {
-                        track.Values.Add(BinaryPrimitives.ReadSingleLittleEndian(block[(valuesAt + (((k * dim) + c) * 4))..]));
-                        track.In.Add(BinaryPrimitives.ReadSingleLittleEndian(block[(inAt + (((k * dim) + c) * 4))..]));
-                        track.Out.Add(BinaryPrimitives.ReadSingleLittleEndian(block[(outAt + (((k * dim) + c) * 4))..]));
+                        double dt = track.Times[k] - track.Times[k - 1];
+                        if (dt <= 0) throw new InvalidDataException("non-increasing key times");
+                        inTan[(k * dim) + c] = (float)(ReadZigzag(d, ref p) / valueGrid / dt);
+                    }
+
+                    if (k < keys - 1)
+                    {
+                        double dt = track.Times[k + 1] - track.Times[k];
+                        if (dt <= 0) throw new InvalidDataException("non-increasing key times");
+                        outTan[(k * dim) + c] = (float)(ReadZigzag(d, ref p) / valueGrid / dt);
                     }
                 }
             }
+
+            track.Values.AddRange(values);
+            track.In.AddRange(inTan);
+            track.Out.AddRange(outTan);
+            r.Tracks[(id, channel)] = track;
         }
 
+        Assert.Equal(d.Length, p); // track data runs exactly to the end of the file
         return r;
+    }
+
+    private static ulong ReadVarint(ReadOnlySpan<byte> d, ref int p)
+    {
+        ulong result = 0;
+        double scale = 1; // 128^i, arithmetic only
+        for (int i = 0; i < 8; i++)
+        {
+            byte b = d[p++];
+            result += (ulong)(b & 0x7F) * (ulong)scale;
+            if ((b & 0x80) == 0)
+            {
+                return result;
+            }
+
+            scale *= 128;
+        }
+
+        throw new InvalidDataException("varint longer than 8 bytes");
+    }
+
+    private static long ReadZigzag(ReadOnlySpan<byte> d, ref int p)
+    {
+        ulong u = ReadVarint(d, ref p);
+        return (long)(u >> 1) ^ -(long)(u & 1);
     }
 
     /// <summary>Evaluates a track at time t: clamped before the first and after the last key.</summary>

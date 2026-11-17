@@ -172,4 +172,64 @@ public class CompileWorkerTests : IDisposable
         Assert.Equal(SessionStatus.WaitingForScene, session.Status);
         Assert.Null(session.ErrorMessage);
     }
+
+    [Fact]
+    public async Task Compile_CompressesTheRawLogInPlace_AndARecompileStillWorks()
+    {
+        Guid id = await SeedSessionAsync(SessionStatus.Queued, DateTime.UtcNow);
+        await SeedRegistryAsync();
+        string plain = _paths.SessionFull(Path.Combine(StoragePaths.SessionDir(_p, id), StoragePaths.RawLogFile));
+        long plainSize = new FileInfo(plain).Length;
+
+        Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
+
+        string compressedRelative = Path.Combine(StoragePaths.SessionDir(_p, id), StoragePaths.RawLogCompressedFile);
+        using (MoodyBluesDbContext db = Db())
+        {
+            Session session = (await db.Sessions.FindAsync(id))!;
+            Assert.Equal(SessionStatus.Ready, session.Status);
+            Assert.Equal(compressedRelative, session.RawLogPath);
+            Assert.False(File.Exists(plain));
+            Assert.Equal(new FileInfo(_paths.SessionFull(compressedRelative)).Length, session.RawLogSizeBytes);
+
+            // The compressed log decompresses to the original records.
+            RawLogRecord[] records = RawLogReader.Read(_paths.SessionFull(compressedRelative)).ToArray();
+            Assert.Equal([RawLogRecordKind.ConnectionOpened, RawLogRecordKind.Message, RawLogRecordKind.ConnectionClosed], records.Select(r => r.Kind));
+            Assert.True(plainSize > 0);
+
+            // Recompile from the compressed log.
+            session.Status = SessionStatus.Queued;
+            await db.SaveChangesAsync();
+        }
+
+        Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
+
+        using MoodyBluesDbContext after = Db();
+        Session again = (await after.Sessions.FindAsync(id))!;
+        Assert.Equal(SessionStatus.Ready, again.Status);
+        Assert.Equal(compressedRelative, again.RawLogPath);
+        Assert.False(File.Exists(plain));
+        Assert.Equal(1, again.ObjectCount);
+    }
+
+    [Fact]
+    public async Task Compile_Failure_KeepsThePlainRawLog()
+    {
+        // No registry file on disk for this revision: the compile fails, the plain log must survive.
+        Guid id = await SeedSessionAsync(SessionStatus.Queued, DateTime.UtcNow);
+        await SeedRegistryAsync();
+        using (MoodyBluesDbContext db = Db())
+        {
+            SceneRevision revision = (await db.SceneRevisions.FindAsync(_p, "scene1", Hash))!;
+            File.Delete(_paths.SceneFull(revision.RegistryPath!));
+        }
+
+        Assert.True(await Worker().CompileNextAsync(DateTime.UtcNow, CancellationToken.None));
+
+        using MoodyBluesDbContext check = Db();
+        Session session = (await check.Sessions.FindAsync(id))!;
+        Assert.Equal(SessionStatus.Failed, session.Status);
+        Assert.EndsWith(StoragePaths.RawLogFile, session.RawLogPath);
+        Assert.True(File.Exists(_paths.SessionFull(session.RawLogPath)));
+    }
 }

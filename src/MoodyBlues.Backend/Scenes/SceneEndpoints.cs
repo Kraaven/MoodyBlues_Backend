@@ -222,7 +222,7 @@ public static class SceneEndpoints
         }
 
         httpContext.Response.Headers.Append(HeaderNames.Vary, HeaderNames.AcceptEncoding);
-        if (!AcceptsGzip(httpContext.Request))
+        if (!AcceptEncoding.Accepts(httpContext.Request, "gzip"))
         {
             return Results.File(fullPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: true);
         }
@@ -233,10 +233,6 @@ public static class SceneEndpoints
         httpContext.Response.Headers.ContentEncoding = "gzip";
         return Results.File(gzipPath, "model/gltf-binary", $"{sceneId}.glb", enableRangeProcessing: false);
     }
-
-    private static bool AcceptsGzip(HttpRequest request) =>
-        request.GetTypedHeaders().AcceptEncoding.Any(e =>
-            string.Equals(e.Value.Value, "gzip", StringComparison.OrdinalIgnoreCase) && e.Quality != 0);
 
     /// <summary>
     /// The list/summary form of a scene. Takes its current revision so a project's scenes can be

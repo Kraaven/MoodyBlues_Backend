@@ -11,7 +11,7 @@ public static class ProtocolConstants
     /// The only protocol version this decoder accepts (Spec 6.1, BeginSession). Older versions are
     /// not supported: the project is in early alpha, so there are no older clients to serve.
     /// </summary>
-    public const ushort ProtocolVersion = 3;
+    public const ushort ProtocolVersion = 4;
 
     /// <summary>EventType + ObjectID, carried by every event except the session maintenance ones.</summary>
     public const int EnvelopeSize = 3;

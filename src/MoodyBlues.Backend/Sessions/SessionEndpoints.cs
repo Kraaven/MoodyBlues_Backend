@@ -1,12 +1,16 @@
+using System.Globalization;
+using System.IO.Compression;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Net.Http.Headers;
 using MoodyBlues.Backend.Auth;
 using MoodyBlues.Backend.Common;
 using MoodyBlues.Backend.Compiler;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Projects;
+using MoodyBlues.Backend.Scenes;
 using MoodyBlues.Backend.Storage;
 
 namespace MoodyBlues.Backend.Sessions;
@@ -158,8 +162,8 @@ public static class SessionEndpoints
     private static Guid? UserIdOf(ClaimsPrincipal principal) => CurrentUser.TryGetUserId(principal, out Guid id) ? id : null;
 
     /// <summary>
-    /// The compiled replay file. Stored gzipped and sent with <c>Content-Encoding: gzip</c>, so the
-    /// browser hands the viewer the uncompressed bytes.
+    /// The compiled replay file. Stored brotli-compressed and sent with <c>Content-Encoding: br</c>,
+    /// so the browser hands the viewer the uncompressed bytes.
     /// </summary>
     public static async Task<IResult> DownloadReplayAsync(
         string sessionId,
@@ -191,9 +195,26 @@ public static class SessionEndpoints
             return Results.NotFound("The replay file is not on disk.");
         }
 
-        httpContext.Response.Headers.ContentEncoding = "gzip";
         httpContext.Response.Headers.CacheControl = "private, no-cache";
-        return Results.File(fullPath, "application/octet-stream", $"{session.Id:N}.mbr");
+        httpContext.Response.Headers.Append(HeaderNames.Vary, HeaderNames.AcceptEncoding);
+        if (session.ReplayDecodedSizeBytes > 0)
+        {
+            // Content-Length is the compressed size (or absent when decompressing on the fly), so
+            // the viewer reads the real size here for its download progress.
+            httpContext.Response.Headers[SceneEndpoints.DecodedLengthHeader] =
+                session.ReplayDecodedSizeBytes.ToString(CultureInfo.InvariantCulture);
+        }
+
+        string downloadName = $"{session.Id:N}.mbr";
+        if (AcceptEncoding.Accepts(httpContext.Request, "br"))
+        {
+            httpContext.Response.Headers.ContentEncoding = "br";
+            return Results.File(fullPath, "application/octet-stream", downloadName);
+        }
+
+        // A client that cannot decode brotli gets the plain bytes, decompressed as they are sent.
+        var file = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+        return Results.Stream(new BrotliStream(file, CompressionMode.Decompress), "application/octet-stream", downloadName);
     }
 
     /// <summary>Rebuilds the replay from the raw log, e.g. after a compiler improvement.</summary>

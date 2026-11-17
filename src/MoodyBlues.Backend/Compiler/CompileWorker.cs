@@ -181,6 +181,48 @@ public sealed class CompileWorker(
         return true;
     }
 
+    /// <summary>
+    /// A compiled session is sealed, so its raw log (kept as the source for recompiles) is stored
+    /// brotli-compressed. Points <see cref="Session.RawLogPath"/> at the compressed file, to be
+    /// saved with the rest of the compile result, and returns the plain file to delete after that
+    /// save (null when already compressed or when compression failed: the plain log then stays,
+    /// which is correct, just larger).
+    /// </summary>
+    private async Task<string?> CompressRawLogAsync(Session session, CancellationToken cancellationToken)
+    {
+        if (RawLogCompression.IsCompressed(session.RawLogPath))
+        {
+            return null;
+        }
+
+        string plainFull = paths.SessionFull(session.RawLogPath);
+        string compressedRelative = Path.Combine(StoragePaths.SessionDir(session.ProjectId, session.Id), StoragePaths.RawLogCompressedFile);
+        try
+        {
+            long size = await RawLogCompression.CompressAsync(plainFull, paths.SessionFull(compressedRelative), cancellationToken);
+            session.RawLogPath = compressedRelative;
+            session.RawLogSizeBytes = size;
+            return plainFull;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ConsoleLog.Warn($"Compile worker: could not compress the raw log of session {session.Id}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static void TryDeleteFile(string fullPath)
+    {
+        try
+        {
+            File.Delete(fullPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ConsoleLog.Warn($"Compile worker: could not delete {fullPath}: {ex.Message}");
+        }
+    }
+
     private async Task CompileAsync(Session session, SceneRevision revision, MoodyBluesDbContext db, CancellationToken cancellationToken)
     {
         session.Status = SessionStatus.Compiling;
@@ -194,14 +236,18 @@ public sealed class CompileWorker(
         {
             SceneRegistry registry = await SceneRegistry.LoadAsync(paths.SceneFull(revision.RegistryPath!), timeout.Token);
             var started = DateTime.UtcNow;
-            CompiledReplay replay = await SessionCompiler.CompileAsync(
+            SessionCompiler.Result result = await SessionCompiler.CompileAsync(
                 paths.SessionFull(session.RawLogPath),
                 registry,
                 paths.SessionFull(replayRelative),
                 cancellationToken: timeout.Token);
+            CompiledReplay replay = result.Replay;
+
+            string? plainLogToDelete = await CompressRawLogAsync(session, cancellationToken);
 
             session.ReplayPath = replayRelative;
             session.ReplaySizeBytes = new FileInfo(paths.SessionFull(replayRelative)).Length;
+            session.ReplayDecodedSizeBytes = result.ReplayDecodedBytes;
             session.DurationSeconds = replay.DurationSeconds;
             session.ObjectCount = replay.Objects.Count;
             session.SpawnCount = replay.SpawnCount;
@@ -222,6 +268,11 @@ public sealed class CompileWorker(
                 : null;
             session.Status = SessionStatus.Ready;
             await db.SaveChangesAsync(cancellationToken);
+
+            if (plainLogToDelete is not null)
+            {
+                TryDeleteFile(plainLogToDelete);
+            }
 
             ConsoleLog.Info(
                 $"Compiled session {session.Id}: {replay.DurationSeconds:F1}s, {replay.Objects.Count} objects, " +

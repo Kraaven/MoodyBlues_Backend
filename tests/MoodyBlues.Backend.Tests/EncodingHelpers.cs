@@ -14,12 +14,22 @@ namespace MoodyBlues.Backend.Tests;
 /// </summary>
 public static class EncodingHelpers
 {
+    /// <summary>Unsigned linear remap of <c>[min, max]</c> onto <c>[0, 2^bits - 1]</c> (absolute scale, absolute single-axis angle).</summary>
     public static uint QuantizeValue(float value, int bits, float min, float max)
     {
         uint maxInt = (1u << bits) - 1u;
         float t = (value - min) / (max - min);
         t = Math.Clamp(t, 0f, 1f);
         return (uint)MathF.Round(t * maxInt);
+    }
+
+    /// <summary>Symmetric encode: <c>q = clamp(round(v / step), -L, L)</c>, stored as <c>q + L</c>.</summary>
+    public static uint QuantizeSymmetric(float value, int bits, float range)
+    {
+        int levels = Quantize.SymmetricLevels(bits);
+        float step = (float)(range / (float)levels);
+        int q = Math.Clamp((int)MathF.Round(value / step), -levels, levels);
+        return (uint)(q + levels);
     }
 
     public static byte[] Concat(params byte[][] parts) => parts.SelectMany(p => p).ToArray();
@@ -40,7 +50,16 @@ public static class EncodingHelpers
         return buf;
     }
 
-    public static byte[] PackVector3_16(Vector3 v, (float Min, float Max) range)
+    public static byte[] PackPosition(Vector3 v, float range)
+    {
+        var buf = new byte[6];
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(0), (ushort)QuantizeSymmetric(v.X, 16, range));
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(2), (ushort)QuantizeSymmetric(v.Y, 16, range));
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(4), (ushort)QuantizeSymmetric(v.Z, 16, range));
+        return buf;
+    }
+
+    public static byte[] PackScale(Vector3 v, (float Min, float Max) range)
     {
         var buf = new byte[6];
         BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(0), (ushort)QuantizeValue(v.X, 16, range.Min, range.Max));
@@ -49,8 +68,8 @@ public static class EncodingHelpers
         return buf;
     }
 
-    public static byte[] PackVector3_8(Vector3 v, (float Min, float Max) range) =>
-        [(byte)QuantizeValue(v.X, 8, range.Min, range.Max), (byte)QuantizeValue(v.Y, 8, range.Min, range.Max), (byte)QuantizeValue(v.Z, 8, range.Min, range.Max)];
+    public static byte[] PackDeltaScale(Vector3 v, float range) =>
+        [(byte)QuantizeSymmetric(v.X, 8, range), (byte)QuantizeSymmetric(v.Y, 8, range), (byte)QuantizeSymmetric(v.Z, 8, range)];
 
     public static byte[] PackScalar16(float value, (float Min, float Max) range)
     {
@@ -59,11 +78,11 @@ public static class EncodingHelpers
         return buf;
     }
 
-    public static byte[] PackScalar8(float value, (float Min, float Max) range) =>
-        [(byte)QuantizeValue(value, 8, range.Min, range.Max)];
+    public static byte[] PackDeltaScalar8(float value, float range) =>
+        [(byte)QuantizeSymmetric(value, 8, range)];
 
     /// <summary>Section 7.5 encode: smallest-three quaternion, 4 bytes.</summary>
-    public static byte[] PackQuatSmallestThree(Quaternion q, (float Min, float Max) range)
+    public static byte[] PackQuatSmallestThree(Quaternion q, float range)
     {
         Span<float> comps = [q.X, q.Y, q.Z, q.W];
 
@@ -95,7 +114,7 @@ public static class EncodingHelpers
                 continue;
             }
 
-            uint q10 = QuantizeValue(comps[i], 10, range.Min, range.Max) & 0x3FF;
+            uint q10 = QuantizeSymmetric(comps[i], 10, range) & 0x3FF;
             packed |= q10 << shift;
             shift += 10;
         }
@@ -106,7 +125,7 @@ public static class EncodingHelpers
     }
 
     /// <summary>Section 7.8 encode: quaternion, drop-W, 3 bytes.</summary>
-    public static byte[] PackQuatDropW(Quaternion q, (float Min, float Max) range)
+    public static byte[] PackQuatDropW(Quaternion q, float range)
     {
         float x = q.X;
         float y = q.Y;
@@ -119,12 +138,13 @@ public static class EncodingHelpers
             z = -z;
         }
 
-        return [(byte)QuantizeValue(x, 8, range.Min, range.Max), (byte)QuantizeValue(y, 8, range.Min, range.Max), (byte)QuantizeValue(z, 8, range.Min, range.Max)];
+        return [(byte)QuantizeSymmetric(x, 8, range), (byte)QuantizeSymmetric(y, 8, range), (byte)QuantizeSymmetric(z, 8, range)];
     }
 
-    public static byte[] PackAxisAngle(int axisId, float angle, (float Min, float Max) angleRange)
+    /// <summary>Delta single-axis rotation: 14-bit symmetric angle over +/-range degrees.</summary>
+    public static byte[] PackAxisAngle(int axisId, float angle, float range)
     {
-        uint q = QuantizeValue(angle, 14, angleRange.Min, angleRange.Max) & 0x3FFF;
+        uint q = QuantizeSymmetric(angle, 14, range) & 0x3FFF;
         ushort raw = (ushort)((uint)(axisId & 0b11) | (q << 2));
         var buf = new byte[2];
         BinaryPrimitives.WriteUInt16LittleEndian(buf, raw);
@@ -132,11 +152,11 @@ public static class EncodingHelpers
     }
 
     /// <summary>Section 7.7 encode: delta position packed x11/y10/z11, 4 bytes.</summary>
-    public static byte[] PackDeltaPosition(Vector3 v, (float Min, float Max) range)
+    public static byte[] PackDeltaPosition(Vector3 v, float range)
     {
-        uint qx = QuantizeValue(v.X, 11, range.Min, range.Max) & 0x7FF;
-        uint qy = QuantizeValue(v.Y, 10, range.Min, range.Max) & 0x3FF;
-        uint qz = QuantizeValue(v.Z, 11, range.Min, range.Max) & 0x7FF;
+        uint qx = QuantizeSymmetric(v.X, 11, range) & 0x7FF;
+        uint qy = QuantizeSymmetric(v.Y, 10, range) & 0x3FF;
+        uint qz = QuantizeSymmetric(v.Z, 11, range) & 0x7FF;
         uint packed = qx | (qy << 11) | (qz << 21);
         var buf = new byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(buf, packed);

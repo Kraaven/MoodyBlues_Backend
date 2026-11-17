@@ -73,37 +73,37 @@ public sealed class WireBuilder
     public WireBuilder Delete(ushort id) => Raw(Envelope(EventType.DeleteObject, id));
 
     public WireBuilder TruePosition(ushort id, Vector3 p) =>
-        Raw(Concat(Envelope(EventType.TruePosition, id), PackVector3_16(p, (-Ranges.PositionRange, Ranges.PositionRange))));
+        Raw(Concat(Envelope(EventType.TruePosition, id), PackPosition(p, Ranges.PositionRange)));
 
     public WireBuilder TrueRotation(ushort id, Quaternion q) =>
-        Raw(Concat(Envelope(EventType.TrueRotation, id), PackQuatSmallestThree(q, (-ProtocolConstants.TrueRotationComponentRange, ProtocolConstants.TrueRotationComponentRange))));
+        Raw(Concat(Envelope(EventType.TrueRotation, id), PackQuatSmallestThree(q, ProtocolConstants.TrueRotationComponentRange)));
 
     public WireBuilder TrueTransform(ushort id, Vector3 p, Quaternion q, Vector3 s) => Raw(Concat(
         Envelope(EventType.TrueTransform, id),
-        PackVector3_16(p, (-Ranges.PositionRange, Ranges.PositionRange)),
-        PackQuatSmallestThree(q, (-ProtocolConstants.TrueRotationComponentRange, ProtocolConstants.TrueRotationComponentRange)),
-        PackVector3_16(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
+        PackPosition(p, Ranges.PositionRange),
+        PackQuatSmallestThree(q, ProtocolConstants.TrueRotationComponentRange),
+        PackScale(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
 
     public WireBuilder DeltaPosition(ushort id, Vector3 delta) =>
-        Raw(Concat(Envelope(EventType.DeltaPosition, id), PackDeltaPosition(delta, (-Ranges.DeltaPositionRange, Ranges.DeltaPositionRange))));
+        Raw(Concat(Envelope(EventType.DeltaPosition, id), PackDeltaPosition(delta, Ranges.DeltaPositionRange)));
 
     public WireBuilder DeltaRotationSingleAxis(ushort id, int axis, float degrees) =>
-        Raw(Concat(Envelope(EventType.DeltaRotationSingleAxis, id), PackAxisAngle(axis, degrees, (-Ranges.DeltaSingleAxisAngleRange, Ranges.DeltaSingleAxisAngleRange))));
+        Raw(Concat(Envelope(EventType.DeltaRotationSingleAxis, id), PackAxisAngle(axis, degrees, Ranges.DeltaSingleAxisAngleRange)));
 
     public WireBuilder Instantiate(ushort id, ushort template, ushort parent, Vector3 p, Quaternion q, Vector3 s) => Raw(Concat(
         Envelope(EventType.InstantiateObject, id),
         UShort(template),
         UShort(parent),
-        PackVector3_16(p, (-Ranges.PositionRange, Ranges.PositionRange)),
-        PackQuatSmallestThree(q, (-ProtocolConstants.TrueRotationComponentRange, ProtocolConstants.TrueRotationComponentRange)),
-        PackVector3_16(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
+        PackPosition(p, Ranges.PositionRange),
+        PackQuatSmallestThree(q, ProtocolConstants.TrueRotationComponentRange),
+        PackScale(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
 
     public WireBuilder Reparent(ushort id, ushort parent, Vector3 p, Quaternion q, Vector3 s) => Raw(Concat(
         Envelope(EventType.ReparentObject, id),
         UShort(parent),
-        PackVector3_16(p, (-Ranges.PositionRange, Ranges.PositionRange)),
-        PackQuatSmallestThree(q, (-ProtocolConstants.TrueRotationComponentRange, ProtocolConstants.TrueRotationComponentRange)),
-        PackVector3_16(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
+        PackPosition(p, Ranges.PositionRange),
+        PackQuatSmallestThree(q, ProtocolConstants.TrueRotationComponentRange),
+        PackScale(s, (Ranges.ScaleMin, Ranges.ScaleMax))));
 
     private static byte[] UShort(ushort v)
     {
@@ -115,7 +115,7 @@ public sealed class WireBuilder
     /// <summary>What the decoder reconstructs from a quantized delta position (the client's feedback value).</summary>
     public Vector3 QuantizedDeltaPosition(Vector3 delta)
     {
-        byte[] bytes = PackDeltaPosition(delta, (-Ranges.DeltaPositionRange, Ranges.DeltaPositionRange));
+        byte[] bytes = PackDeltaPosition(delta, Ranges.DeltaPositionRange);
         return Quantize.DecodeDeltaPosition(bytes, Ranges.DeltaPositionRange);
     }
 }

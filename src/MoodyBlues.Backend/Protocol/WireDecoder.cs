@@ -32,7 +32,8 @@ public sealed class WireDecoder
 
     /// <summary>
     /// Checks framing (every type known, no truncation), that the connection starts with a
-    /// BeginSession, and that its version is supported. Does not change decoder state.
+    /// BeginSession, that its version is supported, and that no quantized field holds an invalid code.
+    /// Does not change decoder state.
     /// </summary>
     public void Validate(ReadOnlySpan<byte> message)
     {
@@ -81,30 +82,21 @@ public sealed class WireDecoder
                 throw new ProtocolException($"Expected BeginSession as the first event of the connection, got {(EventType)type}.");
             }
 
-            int axisOffset = SingleAxisPayloadOffset((EventType)type);
-            if (axisOffset >= 0)
+            if (type != (byte)EventType.BeginSession && ProtocolConstants.TryGetPayloadSize(type, out _))
             {
-                ushort raw = BinaryPrimitives.ReadUInt16LittleEndian(
-                    message.Slice(offset + ProtocolConstants.EnvelopeSize + axisOffset, 2));
-                if ((raw & 0b11) == 3)
-                {
-                    throw new ProtocolException($"Invalid single-axis rotation axis id 3 in {(EventType)type} at offset {offset}.");
-                }
+                // Dry-run decode so value-level errors (reserved all-ones quantized code, axis id 3)
+                // are found here, before Decode emits anything. They do not depend on the ranges.
+                DecodeEnvelopeEvent(
+                    (EventType)type, 0, message.Slice(offset + ProtocolConstants.EnvelopeSize, size - ProtocolConstants.EnvelopeSize), Discard);
             }
 
             offset += size;
         }
     }
 
-    /// <summary>Payload offset of the axis+angle field for single-axis events, or -1.</summary>
-    private static int SingleAxisPayloadOffset(EventType type) => type switch
-    {
-        EventType.TrueRotationSingleAxis => 0,
-        EventType.DeltaRotationSingleAxis => 0,
-        EventType.TruePositionRotationSingleAxis => 6,
-        EventType.DeltaPositionRotationSingleAxis => 4,
-        _ => -1,
-    };
+    private sealed class DiscardSink : WireEventSinkBase;
+
+    private static readonly DiscardSink Discard = new();
 
     private static int EventSize(byte type, int offset) => type switch
     {
@@ -261,25 +253,25 @@ public sealed class WireDecoder
         sink.OnTransform(id, u);
     }
 
-    private Vector3 TruePos(ReadOnlySpan<byte> p) => Quantize.DecodeVector3_16(p, -Ranges.PositionRange, Ranges.PositionRange);
+    private Vector3 TruePos(ReadOnlySpan<byte> p) => Quantize.DecodePosition(p, Ranges.PositionRange);
 
-    private Vector3 TrueScale(ReadOnlySpan<byte> p) => Quantize.DecodeVector3_16(p, Ranges.ScaleMin, Ranges.ScaleMax);
+    private Vector3 TrueScale(ReadOnlySpan<byte> p) => Quantize.DecodeScale(p, Ranges.ScaleMin, Ranges.ScaleMax);
 
     private static Quaternion TrueRot(ReadOnlySpan<byte> p) => Quantize.DecodeQuatSmallestThree(p);
 
     private static Quaternion TrueAxisRot(ReadOnlySpan<byte> p) =>
-        Quantize.DecodeAxisAngle(p, ProtocolConstants.TrueSingleAxisAngleMin, ProtocolConstants.TrueSingleAxisAngleMax);
+        Quantize.DecodeAxisAngle(p, symmetric: false, range: 0f);
 
     private Vector3 DeltaPos(ReadOnlySpan<byte> p) => Quantize.DecodeDeltaPosition(p, Ranges.DeltaPositionRange);
 
     private Quaternion DeltaRot(ReadOnlySpan<byte> p) => Quantize.DecodeQuatDropW(p, Ranges.DeltaRotationComponentRange);
 
     private Quaternion DeltaAxisRot(ReadOnlySpan<byte> p) =>
-        Quantize.DecodeAxisAngle(p, -Ranges.DeltaSingleAxisAngleRange, Ranges.DeltaSingleAxisAngleRange);
+        Quantize.DecodeAxisAngle(p, symmetric: true, Ranges.DeltaSingleAxisAngleRange);
 
-    private Vector3 DeltaScale3(ReadOnlySpan<byte> p) => Quantize.DecodeVector3_8(p, -Ranges.DeltaScaleRange, Ranges.DeltaScaleRange);
+    private Vector3 DeltaScale3(ReadOnlySpan<byte> p) => Quantize.DecodeDeltaScale(p, Ranges.DeltaScaleRange);
 
-    private Vector3 DeltaScale1(byte raw) => Uniform(Quantize.DecodeScalar8(raw, -Ranges.DeltaScaleRange, Ranges.DeltaScaleRange));
+    private Vector3 DeltaScale1(byte raw) => Uniform(Quantize.DecodeScalar8(raw, Ranges.DeltaScaleRange));
 
     private static Vector3 Uniform(float v) => new(v, v, v);
 

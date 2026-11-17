@@ -295,6 +295,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<long>("RawLogSizeBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<long>("ReplayDecodedSizeBytes")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("ReplayPath")
                         .HasColumnType("text");
 

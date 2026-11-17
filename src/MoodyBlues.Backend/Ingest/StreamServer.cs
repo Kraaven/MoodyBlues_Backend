@@ -108,8 +108,20 @@ public sealed class StreamServer(
         {
             // Everything acquired here is released in finally, whatever throws.
             registration = connections.Opened(sessionId, abort);
+
+            // Re-checked now that the connection is registered: from here on nothing can seal the
+            // session, so the plain raw log is still the file to append to. Without this, a
+            // connection that passed the status check just before the session was sealed and
+            // compiled would create a second plain log next to the compressed one.
+            int index = await RecordConnectionOpenedAsync(sessionId);
+            if (index < 0)
+            {
+                await CloseOutputAsync(socket, sendLock, WebSocketCloseStatus.PolicyViolation, "session ended");
+                return;
+            }
+
+            connectionIndex = (uint)index;
             writer = writers.Acquire(rawLogFull);
-            connectionIndex = (uint)await RecordConnectionOpenedAsync(sessionId);
             writer.AppendConnectionOpened(connectionIndex);
             opened = true;
 
@@ -242,10 +254,13 @@ public sealed class StreamServer(
 
             registration?.Dispose();
 
-            await TouchAsync(sessionId, size, endDetector.Seen);
-            if (endDetector.Seen)
+            if (opened)
             {
-                compileSignal.Signal.Notify();
+                await TouchAsync(sessionId, size, endDetector.Seen);
+                if (endDetector.Seen)
+                {
+                    compileSignal.Signal.Notify();
+                }
             }
 
             ConsoleLog.Info(
@@ -265,14 +280,15 @@ public sealed class StreamServer(
         return DateTime.UtcNow >= sessionDeadline ? "session duration limit reached" : null;
     }
 
+    /// <summary>The new connection's index, or -1 when the session is gone or no longer Recording.</summary>
     private async Task<int> RecordConnectionOpenedAsync(Guid sessionId)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MoodyBluesDbContext>();
         Session? session = await db.Sessions.FindAsync(sessionId);
-        if (session is null)
+        if (session is null || session.Status != SessionStatus.Recording)
         {
-            return 0;
+            return -1;
         }
 
         int index = session.ConnectionCount;

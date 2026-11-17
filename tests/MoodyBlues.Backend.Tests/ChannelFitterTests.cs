@@ -7,6 +7,11 @@ public class ChannelFitterTests
 {
     private const double Tick = 1.0 / 40.0;
 
+    // Replay format 3 stores times and values on integer grids (0.1 ms, 1e-4 units, 2^-15), so reading
+    // a track back adds at most about one value step of error.
+    private const float PositionFormatError = 1e-4f;
+    private const float RotationFormatError = 1e-4f;
+
     private static float[] EvalVec(ChannelFitter f, double t)
     {
         var track = ToTrack(f);
@@ -21,7 +26,7 @@ public class ChannelFitterTests
         else if (channel == ReplayChannel.Rotation) obj.Rotation = f;
         else obj.Scale = f;
         var replay = new CompiledReplay { Objects = [obj], DurationSeconds = f.KeyTimes[^1] };
-        return ReplayFileReader.Parse(ReplayFileWriter.Serialize(replay, blockDuration: 7.0));
+        return ReplayFileReader.Parse(ReplayFileWriter.Serialize(replay));
     }
 
     private static void AssertWithinTolerance(ChannelFitter f, IReadOnlyList<(double T, Vector3 V)> samples, float tolerance)
@@ -30,7 +35,7 @@ public class ChannelFitterTests
         foreach ((double t, Vector3 v) in samples)
         {
             Vector3 got = reader.Position(1, t);
-            Assert.True(Vector3.Distance(got, v) <= tolerance * 1.001f + 1e-6f, $"t={t}: expected {v}, got {got}");
+            Assert.True(Vector3.Distance(got, v) <= (tolerance * 1.001f) + PositionFormatError, $"t={t}: expected {v}, got {got}");
         }
     }
 
@@ -156,7 +161,7 @@ public class ChannelFitterTests
         foreach ((double t, Quaternion q) in truth)
         {
             float angle = ReplayFileReader.AngleBetween(reader.Rotation(1, t), q);
-            Assert.True(angle <= tol * 1.01f, $"t={t}: angle error {angle}");
+            Assert.True(angle <= (tol * 1.01f) + RotationFormatError, $"t={t}: angle error {angle}");
         }
 
         Assert.True(f.KeyCount < truth.Count / 4, $"got {f.KeyCount} keys");

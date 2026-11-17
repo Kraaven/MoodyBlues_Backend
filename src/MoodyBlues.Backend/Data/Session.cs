@@ -61,15 +61,22 @@ public sealed class Session
     /// <summary>Number of WebSocket connections the client opened (1 + reconnects).</summary>
     public int ConnectionCount { get; set; }
 
-    /// <summary>Path relative to SessionsDir of the append-only raw wire log.</summary>
+    /// <summary>
+    /// Path relative to SessionsDir of the raw wire log: the append-only plain file while recording,
+    /// the brotli-compressed copy once the session has compiled.
+    /// </summary>
     public required string RawLogPath { get; set; }
 
     public long RawLogSizeBytes { get; set; }
 
-    /// <summary>Path relative to SessionsDir of the compiled, gzipped replay file. Null until Ready.</summary>
+    /// <summary>Path relative to SessionsDir of the compiled, brotli-compressed replay file. Null until Ready.</summary>
     public string? ReplayPath { get; set; }
 
+    /// <summary>Stored (compressed) size of the replay file.</summary>
     public long ReplaySizeBytes { get; set; }
+
+    /// <summary>Size of the replay after decompression, sent as the decoded-length header so the dashboard can show download progress.</summary>
+    public long ReplayDecodedSizeBytes { get; set; }
 
     public double DurationSeconds { get; set; }
 

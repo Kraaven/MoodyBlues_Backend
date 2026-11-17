@@ -1,26 +1,29 @@
-using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 
 namespace MoodyBlues.Backend.Compiler;
 
 /// <summary>
-/// Writes a compiled session as a MoodyBlues replay file ("MBRP", format version 2). The file is
-/// gzipped on disk and served with <c>Content-Encoding: gzip</c>, so browsers receive the raw
-/// layout below. All values are little-endian and every section starts on a 4-byte boundary so
-/// readers can view float arrays in place.
+/// Writes a compiled session as a MoodyBlues replay file ("MBRP", format version 3). The file is
+/// brotli-compressed on disk and served with <c>Content-Encoding: br</c> (or decompressed on the
+/// fly for clients that do not accept it), so viewers receive the layout below. All values are
+/// little-endian. The header and the object, event, log and string tables are 4-byte aligned; the
+/// track section that follows is a plain byte stream.
 ///
 /// <code>
 /// Header (80 bytes)
-///   0  char[4] magic "MBRP"         4  u16 formatVersion (2)      6  u16 flags
-///   8  f64 durationSeconds         16  f32 blockDurationSeconds  20  u32 objectCount
-///  24  u32 eventCount              28  u32 blockCount            32  u32 objectTableOffset
-///  36  u32 eventTableOffset        40  u32 blockIndexOffset      44  u32 totalKeyCount
-///  48  u32 deltaPromotions         52  u32 hardClamps            56  u32 droppedEvents
-///  60  u8  endReason (255 = none)  61  u8 reserved               62  u16 connectionCount
-///  64  u32 logCount                68  u32 logTableOffset        72  u32 stringDataOffset
+///   0  char[4] magic "MBRP"         4  u16 formatVersion (3)      6  u16 flags
+///   8  f64 durationSeconds         16  u32 reserved (0)           20  u32 objectCount
+///  24  u32 eventCount              28  u32 trackCount             32  u32 objectTableOffset
+///  36  u32 eventTableOffset        40  u32 trackDataOffset        44  u32 totalKeyCount
+///  48  u32 deltaPromotions         52  u32 hardClamps             56  u32 droppedEvents
+///  60  u8  endReason (255 = none)  61  u8 reserved                62  u16 connectionCount
+///  64  u32 logCount                68  u32 logTableOffset         72  u32 stringDataOffset
 ///  76  u32 stringDataLength
 ///   flags: bit0 endedCleanly, bit1 hardClamps &gt; 0, bit2 unknown objects were ignored
+///
+/// Sections, in file order: header, object table, event table, log table, string data (padded
+/// with zeros to a 4-byte boundary), track data (runs to the end of the file).
 ///
 /// Object table: objectCount x 20 bytes
 ///   u16 objectId, u8 kind (0 scene, 1 spawned), u8 channelMask (bit0 position, bit1 rotation,
@@ -34,49 +37,79 @@ namespace MoodyBlues.Backend.Compiler;
 ///   f64 time, u8 level (1 info, 2 warning, 3 error), u8 color (0-63), u16 reserved,
 ///   u32 textOffset, u32 textLength   (byte range of UTF-8 text inside the string data)
 ///
-/// String data: stringDataLength bytes of UTF-8, padded with zeros to a 4-byte boundary
+/// String data: stringDataLength bytes of UTF-8
 ///
-/// Block index: blockCount x 16 bytes
-///   f64 blockStartTime, u32 byteOffset, u32 byteLength
-///
-/// Block: u32 trackCount, u32 reserved, then per track:
-///   u16 objectId, u8 channel (0 position, 1 rotation, 2 scale), u8 flags (bit0: first key is a
-///   lead-in copied from before the block), u32 keyCount,
-///   f32 times[keyCount] (seconds relative to blockStartTime; a lead-in is negative),
-///   f32 values[keyCount * dim], f32 inTangents[keyCount * dim], f32 outTangents[keyCount * dim]
-///   dim = 3 for position/scale, 4 for rotation (x, y, z, w). Tangents are units per second.
+/// Track data: trackCount tracks in ascending (objectId, channel) order, each
+///   varint   objectId
+///   u8       channel (0 position, dim 3; 1 rotation, dim 4 = x, y, z, w; 2 scale, dim 3)
+///   varint   keyCount (at least 1)
+///   times    keyCount zigzag varints: deltas of tq = round(timeSeconds * 10000), first from 0
+///   values   for each component c in 0..dim-1: keyCount zigzag varints, deltas (first from 0) of
+///            round(value * G), G = 10000 for position and scale, 32768 for rotation
+///   tangents for each component c in 0..dim-1, for each key k in 0..keyCount-1: a zigzag varint
+///            of round(inTangent[k][c] * dt_(k-1) * G) when k &gt; 0, then one of
+///            round(outTangent[k][c] * dt_k * G) when k &lt; keyCount - 1; not delta coded. Same G as
+///            the values. dt_k = T[k+1] - T[k], where T[k] = tq[k] / 10000 are the decoded key
+///            times, so each tangent is stored as the value change it contributes over its own
+///            segment (the Hermite term m * dt) and its storage error on the curve is at most
+///            about 0.15 * half a value step, whatever the key spacing. The first key's in-tangent
+///            and the last key's out-tangent bound no segment and are not stored; readers set them
+///            to 0. Readers compute tangent = q / G / dt in float64 and store it as float32; a
+///            dt &lt;= 0 is a format error.
+///   varint = unsigned LEB128 (7 bits per byte, low group first, high bit = continue), at most
+///   8 bytes; zigzag(x) = (x &lt;&lt; 1) ^ (x &gt;&gt; 63). Every quantized integer is clamped to
+///   +/-2^46 before delta coding and zigzag, so all of it stays inside a JavaScript safe integer
+///   (readers must decode varints with arithmetic, not 32-bit bit operations).
 /// </code>
 ///
-/// Blocks exist so a viewer can later fetch only the part of a long session it needs (HTTP Range
-/// on the uncompressed file). Each block repeats, as a lead-in, the last key before it of every
-/// track still alive, which makes every block playable on its own. A viewer that loads the whole
-/// file drops the lead-ins and concatenates the blocks.
+/// Keys span the whole session. Values are decoded to float32 and times to float64 seconds; the
+/// curve between keys is a cubic Hermite spline (three.js InterpolateBezier with control points
+/// at one third of the key spacing), and rotations are normalized after interpolation. The
+/// quantization grids (0.1 ms, 0.1 mm / 0.0001 scale, 2^-15 per quaternion component) are far
+/// finer than the fitter's tolerance.
 /// </summary>
 public static class ReplayFileWriter
 {
-    public const ushort FormatVersion = 2;
-    public const double DefaultBlockDurationSeconds = 60.0;
+    public const ushort FormatVersion = 3;
     public const int HeaderSize = 80;
     public const int ObjectEntrySize = 20;
     public const int EventEntrySize = 16;
     public const int LogEntrySize = 20;
-    public const int BlockIndexEntrySize = 16;
 
-    public static byte[] Serialize(CompiledReplay replay, double blockDuration = DefaultBlockDurationSeconds)
+    public const double TimeGrid = 10000.0;
+    public const double PositionScaleGrid = 10000.0;
+    public const double RotationGrid = 32768.0;
+
+    /// <summary>Quantized integers are clamped to this so deltas and zigzag stay inside 2^53.</summary>
+    public const long QuantizedLimit = 1L << 46;
+
+    private static readonly ReplayChannel[] Channels = [ReplayChannel.Position, ReplayChannel.Rotation, ReplayChannel.Scale];
+
+    public static byte[] Serialize(CompiledReplay replay)
     {
         using var ms = new MemoryStream();
-        Write(replay, ms, blockDuration);
+        Write(replay, ms);
         return ms.ToArray();
     }
 
-    public static async Task WriteGzipAsync(CompiledReplay replay, Stream destination, double blockDuration = DefaultBlockDurationSeconds)
+    /// <summary>
+    /// Writes the replay brotli-compressed (quality 11, 16 MB window) and returns the uncompressed
+    /// size, which the server reports to clients that need the decoded length up front.
+    /// </summary>
+    public static async Task<long> WriteBrotliAsync(CompiledReplay replay, Stream destination)
     {
-        byte[] raw = Serialize(replay, blockDuration);
-        await using var gzip = new GZipStream(destination, CompressionLevel.Optimal, leaveOpen: true);
-        await gzip.WriteAsync(raw);
+        byte[] raw = Serialize(replay);
+        var compressed = new byte[BrotliEncoder.GetMaxCompressedLength(raw.Length)];
+        if (!BrotliEncoder.TryCompress(raw, compressed, out int written, quality: 11, window: 24))
+        {
+            throw new InvalidOperationException("Brotli compression of the replay failed.");
+        }
+
+        await destination.WriteAsync(compressed.AsMemory(0, written));
+        return raw.Length;
     }
 
-    public static void Write(CompiledReplay replay, Stream output, double blockDuration = DefaultBlockDurationSeconds)
+    public static void Write(CompiledReplay replay, Stream output)
     {
         var w = new BinaryWriter(output, Encoding.ASCII, leaveOpen: true);
         IReadOnlyList<ReplayObject> objects = replay.Objects;
@@ -99,14 +132,28 @@ public static class ReplayFileWriter
         long paddedStringLength = (stringDataLength + 3) & ~3L;
 
         double duration = Math.Max(replay.DurationSeconds, LastKeyTime(objects));
-        int blockCount = Math.Max(1, (int)Math.Ceiling(duration / blockDuration));
+
+        // Tracks are built first so the header can hold their count.
+        using var trackData = new MemoryStream();
+        uint trackCount = 0;
+        foreach (ReplayObject o in objects.OrderBy(o => o.ObjectId))
+        {
+            foreach (ReplayChannel channel in Channels)
+            {
+                ChannelFitter? f = o.Channel(channel);
+                if (f is { KeyCount: > 0 })
+                {
+                    WriteTrack(trackData, o.ObjectId, channel, f);
+                    trackCount++;
+                }
+            }
+        }
 
         long objectTableOffset = HeaderSize;
         long eventTableOffset = objectTableOffset + ((long)objects.Count * ObjectEntrySize);
         long logTableOffset = eventTableOffset + ((long)events.Count * EventEntrySize);
         long stringDataOffset = logTableOffset + ((long)logs.Count * LogEntrySize);
-        long blockIndexOffset = stringDataOffset + paddedStringLength;
-        long firstBlockOffset = blockIndexOffset + ((long)blockCount * BlockIndexEntrySize);
+        long trackDataOffset = stringDataOffset + paddedStringLength;
 
         // Header
         w.Write("MBRP"u8);
@@ -117,13 +164,13 @@ public static class ReplayFileWriter
         if (replay.UnknownObjectEvents > 0) flags |= 4;
         w.Write(flags);
         w.Write(duration);
-        w.Write((float)blockDuration);
+        w.Write(0u);
         w.Write((uint)objects.Count);
         w.Write((uint)events.Count);
-        w.Write((uint)blockCount);
+        w.Write(trackCount);
         w.Write((uint)objectTableOffset);
         w.Write((uint)eventTableOffset);
-        w.Write((uint)blockIndexOffset);
+        w.Write((uint)trackDataOffset);
         w.Write((uint)Math.Min(uint.MaxValue, replay.KeyframeCount));
         w.Write(replay.DeltaPromotions);
         w.Write(replay.HardClamps);
@@ -175,34 +222,14 @@ public static class ReplayFileWriter
             w.Write(logTextLengths[i]);
         }
 
-        // String data, padded so the block index stays 4-byte aligned.
+        // String data, padded so the track data starts 4-byte aligned.
         w.Write(strings.GetBuffer(), 0, (int)stringDataLength);
         for (long pad = stringDataLength; pad < paddedStringLength; pad++)
         {
             w.Write((byte)0);
         }
 
-        // Blocks are built in memory first so the index can hold their offsets.
-        var blocks = new List<byte[]>(blockCount);
-        for (int b = 0; b < blockCount; b++)
-        {
-            blocks.Add(BuildBlock(objects, b * blockDuration, (b + 1) * blockDuration, isLast: b == blockCount - 1));
-        }
-
-        long offset = firstBlockOffset;
-        for (int b = 0; b < blockCount; b++)
-        {
-            w.Write(b * blockDuration);
-            w.Write((uint)offset);
-            w.Write((uint)blocks[b].Length);
-            offset += blocks[b].Length;
-        }
-
-        foreach (byte[] block in blocks)
-        {
-            w.Write(block);
-        }
-
+        w.Write(trackData.GetBuffer(), 0, (int)trackData.Length);
         w.Flush();
     }
 
@@ -223,90 +250,79 @@ public static class ReplayFileWriter
         return last;
     }
 
-    private static byte[] BuildBlock(IReadOnlyList<ReplayObject> objects, double start, double end, bool isLast)
+    private static void WriteTrack(Stream output, ushort objectId, ReplayChannel channel, ChannelFitter f)
     {
-        using var ms = new MemoryStream();
-        var w = new BinaryWriter(ms);
-        w.Write(0u); // trackCount, patched below
-        w.Write(0u);
-        uint trackCount = 0;
+        int dim = f.Dimension;
+        int keys = f.KeyCount;
+        bool rotation = channel == ReplayChannel.Rotation;
+        double valueGrid = rotation ? RotationGrid : PositionScaleGrid;
 
-        foreach (ReplayObject o in objects)
+        WriteVarint(output, objectId);
+        output.WriteByte((byte)channel);
+        WriteVarint(output, (ulong)keys);
+
+        var tq = new long[keys];
+        long previous = 0;
+        for (int k = 0; k < keys; k++)
         {
-            bool deletedBefore = o.DeleteTime >= 0 && o.DeleteTime <= start;
-            bool spawnedAfter = !isLast && o.SpawnTime >= end;
-            if (deletedBefore || spawnedAfter)
+            tq[k] = QuantizeToInt(f.KeyTimes[k], TimeGrid);
+            WriteZigzag(output, tq[k] - previous);
+            previous = tq[k];
+        }
+
+        for (int c = 0; c < dim; c++)
+        {
+            previous = 0;
+            for (int k = 0; k < keys; k++)
             {
-                continue;
-            }
-
-            foreach (ReplayChannel channel in new[] { ReplayChannel.Position, ReplayChannel.Rotation, ReplayChannel.Scale })
-            {
-                ChannelFitter? f = o.Channel(channel);
-                if (f is not { KeyCount: > 0 })
-                {
-                    continue;
-                }
-
-                // Keys with start <= t < end (the last block also takes keys at exactly 'end'),
-                // preceded by the last earlier key as a lead-in so the block stands alone.
-                int first = LowerBound(f.KeyTimes, start);
-                int stop = isLast ? f.KeyCount : LowerBound(f.KeyTimes, end);
-                bool leadIn = first > 0;
-                int from = leadIn ? first - 1 : first;
-                int count = stop - from;
-                if (count <= 0)
-                {
-                    continue;
-                }
-
-                int dim = f.Dimension;
-                w.Write(o.ObjectId);
-                w.Write((byte)channel);
-                w.Write(leadIn ? (byte)1 : (byte)0);
-                w.Write((uint)count);
-                for (int k = from; k < stop; k++)
-                {
-                    w.Write((float)(f.KeyTimes[k] - start));
-                }
-
-                WriteRange(w, f.KeyValues, from * dim, count * dim);
-                WriteRange(w, f.KeyInTangents, from * dim, count * dim);
-                WriteRange(w, f.KeyOutTangents, from * dim, count * dim);
-                trackCount++;
+                long q = QuantizeToInt(f.KeyValues[(k * dim) + c], valueGrid);
+                WriteZigzag(output, q - previous);
+                previous = q;
             }
         }
 
-        w.Flush();
-        byte[] bytes = ms.ToArray();
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes, trackCount);
-        return bytes;
-    }
-
-    private static void WriteRange(BinaryWriter w, List<float> values, int offset, int count)
-    {
-        for (int i = 0; i < count; i++)
+        // Tangents are stored as m * dt on the value grid, with dt from the decoded (quantized) times.
+        for (int c = 0; c < dim; c++)
         {
-            w.Write(values[offset + i]);
+            for (int k = 0; k < keys; k++)
+            {
+                if (k > 0)
+                {
+                    double dt = (tq[k] - tq[k - 1]) / TimeGrid;
+                    WriteZigzag(output, QuantizeToInt(f.KeyInTangents[(k * dim) + c] * dt, valueGrid));
+                }
+
+                if (k < keys - 1)
+                {
+                    double dt = (tq[k + 1] - tq[k]) / TimeGrid;
+                    WriteZigzag(output, QuantizeToInt(f.KeyOutTangents[(k * dim) + c] * dt, valueGrid));
+                }
+            }
         }
     }
 
-    private static int LowerBound(List<double> times, double value)
+    private static long QuantizeToInt(double value, double grid)
     {
-        int lo = 0, hi = times.Count;
-        while (lo < hi)
+        double scaled = Math.Round(value * grid);
+        if (double.IsNaN(scaled))
         {
-            int mid = (lo + hi) >>> 1;
-            if (times[mid] < value)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid;
-            }
+            return 0;
         }
 
-        return lo;
+        return (long)Math.Clamp(scaled, -QuantizedLimit, QuantizedLimit);
+    }
+
+    private static void WriteZigzag(Stream output, long value) =>
+        WriteVarint(output, (ulong)((value << 1) ^ (value >> 63)));
+
+    private static void WriteVarint(Stream output, ulong value)
+    {
+        while (value >= 0x80)
+        {
+            output.WriteByte((byte)(value | 0x80));
+            value >>= 7;
+        }
+
+        output.WriteByte((byte)value);
     }
 }

@@ -1,8 +1,11 @@
+using System.IO.Compression;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Projects;
+using MoodyBlues.Backend.Scenes;
 using MoodyBlues.Backend.Sessions;
 using MoodyBlues.Backend.Storage;
 
@@ -174,7 +177,7 @@ public class ShareEndpointsTests : IDisposable
     }
 
     [Fact]
-    public async Task Replay_NotReady_IsNotFound_AndReadyIsServedGzipped()
+    public async Task Replay_NotReady_IsNotFound()
     {
         var (user, session, db) = await SeedAsync();
         SharingResponse shared = await SetAsync(user, session, db, true);
@@ -182,18 +185,63 @@ public class ShareEndpointsTests : IDisposable
         var (notReady, _) = await HttpResultTestHelpers.ExecuteAsync(
             await ShareEndpoints.DownloadReplayAsync(shared.ShareToken!, db, _paths, new DefaultHttpContext()));
         Assert.Equal(404, notReady);
+    }
 
+    /// <summary>Makes the session Ready with a brotli replay file holding <paramref name="plain"/>.</summary>
+    private async Task ReadyWithReplayAsync(Session session, MoodyBluesDbContext db, byte[] plain)
+    {
         session.Status = SessionStatus.Ready;
-        session.ReplayPath = "replay.mbr";
+        session.ReplayPath = StoragePaths.ReplayFile;
         string full = _paths.SessionFull(session.ReplayPath);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        await File.WriteAllBytesAsync(full, [1, 2, 3]);
+        await using (var file = File.Create(full))
+        await using (var brotli = new BrotliStream(file, CompressionLevel.Fastest))
+        {
+            await brotli.WriteAsync(plain);
+        }
+
+        session.ReplaySizeBytes = new FileInfo(full).Length;
+        session.ReplayDecodedSizeBytes = plain.Length;
         await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task Replay_WhenBrotliAccepted_IsServedAsStoredWithDecodedLength()
+    {
+        var (user, session, db) = await SeedAsync();
+        SharingResponse shared = await SetAsync(user, session, db, true);
+        byte[] plain = Enumerable.Range(0, 500).Select(i => (byte)(i % 7)).ToArray();
+        await ReadyWithReplayAsync(session, db, plain);
 
         var http = new DefaultHttpContext();
+        http.Request.Headers.AcceptEncoding = "gzip, br";
         var result = await ShareEndpoints.DownloadReplayAsync(shared.ShareToken!, db, _paths, http);
+
         Assert.IsType<Microsoft.AspNetCore.Http.HttpResults.PhysicalFileHttpResult>(result);
-        Assert.Equal("gzip", http.Response.Headers.ContentEncoding.ToString());
+        Assert.Equal("br", http.Response.Headers.ContentEncoding.ToString());
+        Assert.Equal("500", http.Response.Headers[SceneEndpoints.DecodedLengthHeader].ToString());
+    }
+
+    [Fact]
+    public async Task Replay_WithoutBrotli_IsDecompressedOnTheFly()
+    {
+        var (user, session, db) = await SeedAsync();
+        SharingResponse shared = await SetAsync(user, session, db, true);
+        byte[] plain = Enumerable.Range(0, 500).Select(i => (byte)(i % 7)).ToArray();
+        await ReadyWithReplayAsync(session, db, plain);
+
+        var http = new DefaultHttpContext
+        {
+            RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider(),
+        };
+        http.Request.Headers.AcceptEncoding = "gzip";
+        http.Response.Body = new MemoryStream();
+        var result = await ShareEndpoints.DownloadReplayAsync(shared.ShareToken!, db, _paths, http);
+        await result.ExecuteAsync(http);
+
+        Assert.True(string.IsNullOrEmpty(http.Response.Headers.ContentEncoding.ToString()));
+        Assert.Equal("500", http.Response.Headers[SceneEndpoints.DecodedLengthHeader].ToString());
+        Assert.Equal(plain, ((MemoryStream)http.Response.Body).ToArray());
     }
 
     [Fact]
