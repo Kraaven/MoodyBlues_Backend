@@ -32,6 +32,7 @@ public static class SessionEndpoints
         group.MapGet("/replay", DownloadReplayAsync);
         group.MapPut("/sharing", SetSharingAsync);
         group.MapPost("/sharing/reset", ResetSharingAsync);
+        group.MapPut("/share-settings", SetShareSettingsAsync);
         group.MapPost("/recompile", RecompileAsync);
         group.MapDelete("/", DeleteAsync);
     }
@@ -118,9 +119,21 @@ public static class SessionEndpoints
         s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.KeyframeCount,
         s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents, s.RotationWidenings,
         s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount,
-        SessionActivity.FromJson(s.ActivityJson), s.IsPublic, s.ShareToken);
+        SessionActivity.FromJson(s.ActivityJson), s.IsPublic, s.ShareToken, ShareSettingsDocument.ToElement(s.ShareSettingsJson));
 
-    /// <summary>Turns public sharing on or off. The token is created on first use and kept while private.</summary>
+    /// <summary>The anonymous view of a session: no project id, public flag or token.</summary>
+    internal static SharedSessionDetail ToSharedDetail(Session s) => new(
+        s.Id, s.SceneId, s.SceneHash, s.CreatedAtUtc, s.LastActivityUtc, s.Status, s.EndedCleanly,
+        s.ConnectionCount, s.DurationSeconds, s.ObjectCount, s.SpawnCount, s.KeyframeCount,
+        s.ReplaySizeBytes, s.RawLogSizeBytes, s.DeltaPromotions, s.HardClamps, s.DroppedEvents, s.RotationWidenings,
+        s.CompilerVersion, s.CompiledAtUtc, s.ErrorMessage, s.InfoLogCount, s.WarningLogCount, s.ErrorLogCount,
+        SessionActivity.FromJson(s.ActivityJson));
+
+    /// <summary>
+    /// Turns public sharing on or off. The token is created on first use and kept while private. A session
+    /// that goes public with no settings yet gets a copy of the project's share defaults (possibly none), so
+    /// later edits to the defaults never change existing links.
+    /// </summary>
     public static async Task<IResult> SetSharingAsync(
         string sessionId,
         SharingRequest request,
@@ -139,9 +152,42 @@ public static class SessionEndpoints
             session.ShareToken = ShareTokens.Create();
         }
 
+        if (request.IsPublic && session.ShareSettingsJson is null)
+        {
+            session.ShareSettingsJson = await db.Projects
+                .Where(p => p.Id == session.ProjectId)
+                .Select(p => p.ShareDefaultsJson)
+                .FirstOrDefaultAsync();
+        }
+
         AuditLog.Add(db, UserIdOf(principal), AuditLog.SessionShare, session.Id.ToString(), request.IsPublic ? "public" : "private");
         await db.SaveChangesAsync();
         return Results.Ok(new SharingResponse(session.IsPublic, session.ShareToken));
+    }
+
+    /// <summary>Replaces (or, with null, clears) this link's viewer settings.</summary>
+    public static async Task<IResult> SetShareSettingsAsync(
+        string sessionId,
+        ShareSettingsRequest request,
+        ClaimsPrincipal principal,
+        MoodyBluesDbContext db)
+    {
+        (IResult? error, Session? session) = await CheckOwnershipAsync(sessionId, principal, db);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        (string? json, string? invalid) = ShareSettingsDocument.Validate(request.Settings);
+        if (invalid is not null)
+        {
+            return Results.BadRequest(invalid);
+        }
+
+        session!.ShareSettingsJson = json;
+        AuditLog.Add(db, UserIdOf(principal), AuditLog.SessionShareSettings, session.Id.ToString(), json is null ? "cleared" : $"updated ({json.Length} chars)");
+        await db.SaveChangesAsync();
+        return Results.Ok(new ShareSettingsResponse(ShareSettingsDocument.ToElement(json)));
     }
 
     /// <summary>Issues a new share token (even while private), which invalidates the old link.</summary>
@@ -217,7 +263,7 @@ public static class SessionEndpoints
         return Results.Stream(new BrotliStream(file, CompressionMode.Decompress), "application/octet-stream", downloadName);
     }
 
-    /// <summary>Rebuilds the replay from the raw log, e.g. after a compiler improvement.</summary>
+    /// <summary>Rebuilds the replay of a failed build; any other session is not rebuilt.</summary>
     public static async Task<IResult> RecompileAsync(
         string sessionId,
         ClaimsPrincipal principal,
@@ -230,9 +276,9 @@ public static class SessionEndpoints
             return error;
         }
 
-        if (session!.Status is SessionStatus.Recording or SessionStatus.Compiling or SessionStatus.Queued or SessionStatus.WaitingForScene)
+        if (session!.Status != SessionStatus.Failed)
         {
-            return Results.Conflict("The session is still recording, waiting for its scene, or already waiting to compile.");
+            return Results.Conflict("Only a failed build can be rebuilt.");
         }
 
         session.Status = SessionStatus.Queued;

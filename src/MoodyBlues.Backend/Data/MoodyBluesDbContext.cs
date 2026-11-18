@@ -28,6 +28,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
         {
             entity.HasKey(s => new { s.ProjectId, s.SceneId });
             entity.HasOne<Project>().WithMany().HasForeignKey(s => s.ProjectId);
+            entity.Property(s => s.UnityName).HasMaxLength(200);
         });
 
         modelBuilder.Entity<SceneRevision>(entity =>
@@ -50,6 +51,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             entity.HasKey(p => p.Id);
             entity.HasIndex(p => p.IngestKeyHash).IsUnique();
             entity.HasOne<User>().WithMany().HasForeignKey(p => p.UserId);
+            entity.Property(p => p.ShareDefaultsJson).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<Session>(entity =>
@@ -65,6 +67,7 @@ public sealed class MoodyBluesDbContext(DbContextOptions<MoodyBluesDbContext> op
             // session can exist before its scene revision does. The compile worker waits for it.
             entity.HasOne<Project>().WithMany().HasForeignKey(s => s.ProjectId);
             entity.Property(s => s.ActivityJson).HasColumnType("jsonb");
+            entity.Property(s => s.ShareSettingsJson).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<RefreshToken>(entity =>

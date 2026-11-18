@@ -33,6 +33,12 @@ public sealed class Scene
     /// <summary>Dashboard-only display name. Null until renamed; the UI falls back to <see cref="SceneId"/>.</summary>
     public string? DisplayName { get; set; }
 
+    /// <summary>
+    /// The scene's name inside Unity, read from the uploaded GLB (<c>scenes[scene ?? 0].name</c>). Null when the
+    /// GLB carries none. The dashboard shows it when there is no <see cref="DisplayName"/>.
+    /// </summary>
+    public string? UnityName { get; set; }
+
     public DateTime CreatedAtUtc { get; set; }
 
     public DateTime UpdatedAtUtc { get; set; }

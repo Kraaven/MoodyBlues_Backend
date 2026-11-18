@@ -84,6 +84,9 @@ namespace MoodyBlues.Backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("ShareDefaultsJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid");
 
@@ -154,6 +157,10 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("LatestHash")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<string>("UnityName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -314,6 +321,9 @@ namespace MoodyBlues.Backend.Migrations
                     b.Property<string>("SceneId")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<string>("ShareSettingsJson")
+                        .HasColumnType("jsonb");
 
                     b.Property<string>("ShareToken")
                         .HasColumnType("text");

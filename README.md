@@ -329,25 +329,37 @@ names, for example `"Ready"`.
 | `GET /auth/me` | The signed-in user: `{ userId, email }` |
 | `GET /api/projects`, `POST /api/projects` | List / create projects. Creating one issues its first ingest key. Both carry `ingestKeyPrefix` and `ingestKeyCreatedAtUtc` |
 | `POST /api/projects/{projectId}/ingest-key` | Replace the ingest key: `{ connectionString, ingestKeyPrefix, ingestKeyCreatedAtUtc }`. The old key stops working |
-| `GET /api/projects/{projectId}` | A project and its scenes (each with its current version number), and `connectionString` for Unity (null only when the stored key cannot be decrypted; rotate to get a new one) |
+| `GET /api/projects/{projectId}` | A project and its scenes (each with its current version number), `connectionString` for Unity (null only when the stored key cannot be decrypted; rotate to get a new one) and `shareDefaults` (the share-settings template, an object or null) |
+| `PUT /api/projects/{projectId}/share-defaults` | `{ "settings": object \| null }` sets (or clears) the project's template for share-viewer settings: `{ settings }`. New public links copy it; existing links are not changed. 400 unless the settings are a JSON object of at most 16 KB. Audited |
 | `GET /api/projects/{projectId}/scenes/{sceneId}` | The scene: `projectId`, current version, archived versions (newest first, with session counts and sizes), and the number of sessions waiting for an un-uploaded version |
-| `PATCH /api/projects/{projectId}/scenes/{sceneId}` | Rename (`{ "displayName": "..." }`) |
+| `PATCH /api/projects/{projectId}/scenes/{sceneId}` | Rename (`{ "displayName": "..." }`; empty or null clears it, so the scene shows its `unityName` again) |
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}` | Delete the scene: closes its live recordings, then removes every version, session and file |
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}/versions/{n}` | Delete one archived version and its sessions (the current version can only go with the scene: 409) |
 | `DELETE /api/projects/{projectId}/scenes/{sceneId}/archive` | Delete every archived version and their sessions |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/file?hash=` | A version's GLB (optimized if available); without `hash`, the current version. The optimized file is sent as its pre-gzipped copy (`Content-Encoding: gzip`, `Vary: Accept-Encoding`, no byte ranges) when the request accepts gzip. Every response carries `X-MoodyBlues-Decoded-Length` (the GLB size after decoding; CORS-exposed), since `Content-Length` is the gzip size. The same goes for `GET /api/share/{token}/scene` |
 | `GET /api/projects/{projectId}/scenes/{sceneId}/sessions` | Sessions, newest first. `?version=n` filters to one version (404 if it does not exist); `?awaitingScene=true` to sessions waiting for their scene |
-| `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts, `isPublic` and `shareToken` |
+| `GET /api/sessions/{sessionId}` | Session details: recording health counters and log counts, `isPublic`, `shareToken` and `shareSettings` (the link's viewer settings, an object or null) |
 | `GET /api/sessions/{sessionId}/replay` | The compiled replay file, stored brotli-compressed: sent as is with `Content-Encoding: br` when the request accepts br, otherwise decompressed on the fly. `Vary: Accept-Encoding`; `X-MoodyBlues-Decoded-Length` carries the decoded size (CORS-exposed) |
-| `PUT /api/sessions/{sessionId}/sharing` | `{ "isPublic": bool }` turns the public link on or off: `{ isPublic, shareToken }`. The token is created the first time it goes public and kept while private |
+| `PUT /api/sessions/{sessionId}/sharing` | `{ "isPublic": bool }` turns the public link on or off: `{ isPublic, shareToken }`. The token is created the first time it goes public and kept while private. A session that goes public with no `shareSettings` yet gets a copy of the project's `shareDefaults` (possibly none) |
+| `PUT /api/sessions/{sessionId}/share-settings` | `{ "settings": object \| null }` sets (or clears) this link's viewer settings: `{ settings }`. Same validation as the project template (a JSON object, at most 16 KB, else 400). Audited |
 | `POST /api/sessions/{sessionId}/sharing/reset` | Issue a new share token (the old link stops working): `{ isPublic, shareToken }` |
-| `GET /api/share/{token}` | Anonymous (rate limited, 404 unless the session is public): `{ session, projectName, sceneName, sceneVersion }` |
+| `GET /api/share/{token}` | Anonymous (rate limited, 404 unless the session is public): `{ session, projectName, sceneName, sceneVersion, settings }`. `session` is the session detail without `projectId`, `isPublic`, `shareToken` and `shareSettings`; `sceneName` is the scene's display name, else its Unity name, else its id; `settings` is the link's settings, else the project's `shareDefaults`, else null |
 | `GET /api/share/{token}/replay` | Anonymous: the session's replay file, served like the owner route above |
 | `GET /api/share/{token}/scene` | Anonymous: the GLB of the version the session was recorded in |
-| `POST /api/sessions/{sessionId}/recompile` | Rebuild the replay from the raw log |
+| `POST /api/sessions/{sessionId}/recompile` | Rebuild the replay of a failed build from the raw log (202). Any other status is 409 `Only a failed build can be rebuilt.` |
 | `DELETE /api/sessions/{sessionId}` | Delete one session (not while recording or compiling) |
 
 `GET /health` (no sign-in) returns `{ "status": "ok" }` when the database answers, 503 otherwise.
+
+**Share settings** are owned by the frontend: the backend stores them as an opaque `jsonb` object
+(the project template `shareDefaults`, and a copy per link, `shareSettings`), checks only that
+the value is a JSON object of at most 16 KB, and returns it verbatim as JSON.
+
+**Scene names.** Every scene response carries `displayName` (set by renaming) and `unityName`,
+the scene's name inside Unity. `unityName` is read from the uploaded GLB's JSON chunk
+(`scenes[scene ?? 0].name`, trimmed, at most 200 characters) on every new version; a GLB without
+one never fails the upload. At startup a background service fills it, once, for scenes that
+predate the field.
 
 **Session responses.** The list and the detail share these fields: `status`, `endedCleanly`,
 `durationSeconds`, `objectCount`, `spawnCount`, `keyframeCount`, `replaySizeBytes`,
@@ -471,8 +483,8 @@ everything is keyed by the project's ID (`{projectId:N}` is the GUID without das
     session row.
   - `SessionCompiler.Version` (now 4) is stored on each session as `compilerVersion`; recompile
     older sessions to update them (replay format 2 files from before format 3 are not readable and must be recompiled).
-- **Database:** four EF Core migrations, `Initial`, `SessionSharing` (public share links),
-  `OptimizedGzipSize` and `SessionReplayDecodedSize`,
+- **Database:** five EF Core migrations, `Initial`, `SessionSharing` (public share links),
+  `OptimizedGzipSize`, `SessionReplayDecodedSize` and `ShareSettingsAndUnityName`,
   applied at startup. Dumps from before `Initial` was squashed do not restore onto it; use
   `./deploy.sh wipe` for a clean start.
 

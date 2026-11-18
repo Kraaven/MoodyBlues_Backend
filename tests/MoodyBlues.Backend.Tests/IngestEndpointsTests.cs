@@ -174,6 +174,25 @@ public class IngestEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Upload_StoresTheUnityName_AndAnUnreadableGlbStillUploads()
+    {
+        using var db = TestDbContextFactory.Create();
+        await SeedProjectAsync(db, _p);
+
+        await UploadAsync(db, _p, "scene1", Hash, TestGlb.WithSceneName(" Playground "), gzip: false);
+        Assert.Equal("Playground", (await db.Scenes.SingleAsync()).UnityName);
+
+        // A GLB with no scene name is accepted and leaves the known name alone.
+        var (status, _) = await HttpResultTestHelpers.ExecuteAsync(await UploadAsync(db, _p, "scene1", OtherHash, FakeGlb(300), gzip: false));
+        Assert.Equal(200, status);
+        Assert.Equal("Playground", (await db.Scenes.SingleAsync()).UnityName);
+
+        // A new revision with a different name replaces it.
+        await UploadAsync(db, _p, "scene1", new string('c', 64), TestGlb.WithSceneName("Renamed"), gzip: false);
+        Assert.Equal("Renamed", (await db.Scenes.SingleAsync()).UnityName);
+    }
+
+    [Fact]
     public async Task Upload_SameHashTwice_KeepsTheFirstFile()
     {
         using var db = TestDbContextFactory.Create();

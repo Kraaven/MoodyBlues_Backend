@@ -9,6 +9,7 @@ using MoodyBlues.Backend.Config;
 using MoodyBlues.Backend.Data;
 using MoodyBlues.Backend.Logging;
 using MoodyBlues.Backend.Scenes;
+using MoodyBlues.Backend.Sessions;
 
 namespace MoodyBlues.Backend.Projects;
 
@@ -26,6 +27,7 @@ public static class ProjectEndpoints
         group.MapPost("/", CreateAsync);
         group.MapGet("/{id:guid}", GetAsync);
         group.MapPost("/{id:guid}/ingest-key", RotateIngestKeyAsync);
+        group.MapPut("/{id:guid}/share-defaults", SetShareDefaultsAsync);
     }
 
     /// <summary>Public so it can be exercised directly in tests without a live Postgres.</summary>
@@ -133,7 +135,39 @@ public static class ProjectEndpoints
 
         return Results.Ok(new ProjectDetailResponse(
             project.Id, project.Name, project.CreatedAtUtc, sceneResponses,
-            project.IngestKeyPrefix, project.IngestKeyCreatedAtUtc, connectionString));
+            project.IngestKeyPrefix, project.IngestKeyCreatedAtUtc, connectionString,
+            ShareSettingsDocument.ToElement(project.ShareDefaultsJson)));
+    }
+
+    /// <summary>
+    /// Replaces (or, with null, clears) the template that new share links copy. Existing links keep the
+    /// settings they already have.
+    /// </summary>
+    public static async Task<IResult> SetShareDefaultsAsync(
+        Guid id, ShareSettingsRequest request, ClaimsPrincipal principal, MoodyBluesDbContext db)
+    {
+        (IResult? error, Project? project) = await ProjectAccess.FindOwnedAsync(db, principal, id);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        (string? json, string? invalid) = ShareSettingsDocument.Validate(request.Settings);
+        if (invalid is not null)
+        {
+            return Results.BadRequest(invalid);
+        }
+
+        project!.ShareDefaultsJson = json;
+        AuditLog.Add(
+            db,
+            CurrentUser.TryGetUserId(principal, out Guid userId) ? userId : null,
+            AuditLog.ProjectShareDefaults,
+            project.Id.ToString(),
+            json is null ? "cleared" : $"updated ({json.Length} chars)");
+        await db.SaveChangesAsync();
+
+        return Results.Ok(new ShareSettingsResponse(ShareSettingsDocument.ToElement(json)));
     }
 
     /// <summary>

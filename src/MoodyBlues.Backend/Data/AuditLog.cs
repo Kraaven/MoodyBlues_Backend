@@ -15,6 +15,8 @@ public static class AuditLog
     public const string SessionDelete = "session.delete";
     public const string SessionShare = "session.share";
     public const string SessionShareReset = "session.share.reset";
+    public const string SessionShareSettings = "session.share.settings";
+    public const string ProjectShareDefaults = "project.share.defaults";
     public const string IngestKeyRotate = "project.ingestKey.rotate";
 
     /// <summary>Adds the row to the context; the caller's SaveChanges stores it.</summary>

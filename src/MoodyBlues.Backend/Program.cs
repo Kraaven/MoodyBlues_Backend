@@ -51,6 +51,7 @@ builder.Services.AddSingleton<IngestKeyProtector>();
 builder.Services.AddScoped<IGltfOptimizer, NodeGltfOptimizer>();
 builder.Services.AddHostedService<SceneProcessingWorker>();
 builder.Services.AddHostedService<CompileWorker>();
+builder.Services.AddHostedService<UnityNameBackfillService>();
 builder.Services.AddDbContext<MoodyBluesDbContext>(options => options.UseNpgsql(config.DbConnectionString));
 builder.Services.AddRequestDecompression();
 

@@ -122,6 +122,17 @@ public class DashboardEndpointsTests : IDisposable
             await SessionEndpoints.RecompileAsync(session.Id.ToString(), TestPrincipal.For(user), db, new CompileWorkSignal()));
         Assert.Equal(409, conflict);
 
+        foreach (SessionStatus notFailed in new[] { SessionStatus.Recording, SessionStatus.Queued, SessionStatus.WaitingForScene, SessionStatus.Ready })
+        {
+            session.Status = notFailed;
+            await db.SaveChangesAsync();
+            var (rejected, message) = await HttpResultTestHelpers.ExecuteAsync(
+                await SessionEndpoints.RecompileAsync(session.Id.ToString(), TestPrincipal.For(user), db, new CompileWorkSignal()));
+            Assert.Equal(409, rejected);
+            Assert.Contains("Only a failed build can be rebuilt.", message);
+            Assert.Equal(notFailed, session.Status);
+        }
+
         session.Status = SessionStatus.Failed;
         await db.SaveChangesAsync();
         var (accepted, _) = await HttpResultTestHelpers.ExecuteAsync(

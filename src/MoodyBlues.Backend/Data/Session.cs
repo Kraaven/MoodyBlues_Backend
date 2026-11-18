@@ -123,4 +123,10 @@ public sealed class Session
     /// made public, kept when it is made private again (the link just stops working), replaced on reset.
     /// </summary>
     public string? ShareToken { get; set; }
+
+    /// <summary>
+    /// This link's share-viewer settings, an opaque JSON object owned by the frontend. Copied from the
+    /// project's template when the session first becomes public; null until then, or when the template had none.
+    /// </summary>
+    public string? ShareSettingsJson { get; set; }
 }

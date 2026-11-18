@@ -241,6 +241,7 @@ public static class SceneEndpoints
     internal static SceneResponse ToResponse(Scene scene, SceneRevision? latest) => new(
         scene.SceneId,
         scene.DisplayName,
+        scene.UnityName,
         scene.UpdatedAtUtc,
         scene.LatestHash,
         latest?.ServableSizeBytes ?? 0,
@@ -287,6 +288,7 @@ public static class SceneEndpoints
             scene.ProjectId,
             scene.SceneId,
             scene.DisplayName,
+            scene.UnityName,
             scene.CreatedAtUtc,
             scene.UpdatedAtUtc,
             current is null ? null : ToVersion(current),

@@ -143,6 +143,9 @@ public static class SceneUploadEndpoints
             return Results.BadRequest("The body is not a binary glTF (.glb) file.");
         }
 
+        // Best effort: a GLB without a readable scene name is still a valid upload.
+        string? unityName = GlbSceneName.TryReadFile(rawFull);
+
         for (int attempt = 0; attempt < MaxVersionAttempts; attempt++)
         {
             DateTime now = DateTime.UtcNow;
@@ -159,6 +162,7 @@ public static class SceneUploadEndpoints
                     ProjectId = projectId,
                     SceneId = sceneId,
                     LatestHash = sceneHash!,
+                    UnityName = unityName,
                     CreatedAtUtc = now,
                     UpdatedAtUtc = now,
                 });
@@ -166,6 +170,7 @@ public static class SceneUploadEndpoints
             else
             {
                 scene.LatestHash = sceneHash!;
+                scene.UnityName = unityName ?? scene.UnityName;
                 scene.UpdatedAtUtc = now;
             }
 

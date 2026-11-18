@@ -31,10 +31,13 @@ public static class ShareEndpoints
             return Results.NotFound();
         }
 
-        string projectName = await db.Projects.Where(p => p.Id == session.ProjectId).Select(p => p.Name).FirstAsync();
-        string? displayName = await db.Scenes
+        var project = await db.Projects
+            .Where(p => p.Id == session.ProjectId)
+            .Select(p => new { p.Name, p.ShareDefaultsJson })
+            .FirstAsync();
+        var scene = await db.Scenes
             .Where(s => s.ProjectId == session.ProjectId && s.SceneId == session.SceneId)
-            .Select(s => s.DisplayName)
+            .Select(s => new { s.DisplayName, s.UnityName })
             .FirstOrDefaultAsync();
         int? version = await db.SceneRevisions
             .Where(r => r.ProjectId == session.ProjectId && r.SceneId == session.SceneId && r.Hash == session.SceneHash)
@@ -42,10 +45,11 @@ public static class ShareEndpoints
             .FirstOrDefaultAsync();
 
         return Results.Ok(new SharedSessionResponse(
-            SessionEndpoints.ToDetail(session),
-            projectName,
-            string.IsNullOrWhiteSpace(displayName) ? session.SceneId : displayName,
-            version));
+            SessionEndpoints.ToSharedDetail(session),
+            project.Name,
+            FirstNonBlank(scene?.DisplayName, scene?.UnityName) ?? session.SceneId,
+            version,
+            ShareSettingsDocument.ToElement(session.ShareSettingsJson ?? project.ShareDefaultsJson)));
     }
 
     public static async Task<IResult> DownloadReplayAsync(string token, MoodyBluesDbContext db, StoragePaths paths, HttpContext httpContext)
@@ -61,6 +65,9 @@ public static class ShareEndpoints
             ? Results.NotFound()
             : await SceneEndpoints.ServeRevisionAsync(session.ProjectId, session.SceneId, session.SceneHash, db, paths, httpContext);
     }
+
+    private static string? FirstNonBlank(string? first, string? second) =>
+        !string.IsNullOrWhiteSpace(first) ? first : !string.IsNullOrWhiteSpace(second) ? second : null;
 
     private static async Task<Session?> FindAsync(string token, MoodyBluesDbContext db) =>
         ShareTokens.IsWellFormed(token)

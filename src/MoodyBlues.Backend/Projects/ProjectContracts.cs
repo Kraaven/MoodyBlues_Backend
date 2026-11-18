@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MoodyBlues.Backend.Scenes;
 
 namespace MoodyBlues.Backend.Projects;
@@ -28,7 +29,9 @@ public sealed record ProjectDetailResponse(
     IReadOnlyList<SceneResponse> Scenes,
     string IngestKeyPrefix,
     DateTime IngestKeyCreatedAtUtc,
-    string? ConnectionString);
+    string? ConnectionString,
+    /// <summary>The template new share links copy, an opaque JSON object the frontend owns; null = the viewer's built-in default.</summary>
+    JsonElement? ShareDefaults);
 
 /// <summary>A newly created ingest key. The previous key stops working immediately.</summary>
 public sealed record IngestKeyResponse(string ConnectionString, string IngestKeyPrefix, DateTime IngestKeyCreatedAtUtc);

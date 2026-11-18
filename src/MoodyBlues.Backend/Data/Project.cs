@@ -32,4 +32,11 @@ public sealed class Project
     public required string IngestKeyPrefix { get; set; }
 
     public required DateTime IngestKeyCreatedAtUtc { get; set; }
+
+    /// <summary>
+    /// The project's template for share-viewer settings, an opaque JSON object owned by the frontend
+    /// (<see cref="Sessions.ShareSettingsDocument"/> validates it). Null means the viewer's built-in default.
+    /// A session that becomes public copies it; editing it never changes existing links.
+    /// </summary>
+    public string? ShareDefaultsJson { get; set; }
 }

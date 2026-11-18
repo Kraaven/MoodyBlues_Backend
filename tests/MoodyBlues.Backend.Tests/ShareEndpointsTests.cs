@@ -89,8 +89,11 @@ public class ShareEndpointsTests : IDisposable
         Assert.Equal("Game", payload.ProjectName);
         Assert.Equal("scene1", payload.SceneName);
         Assert.Equal(3, payload.SceneVersion);
-        Assert.Contains("\"isPublic\":true", body);
-        Assert.Contains("\"shareToken\"", body);
+        Assert.DoesNotContain("isPublic", body);
+        Assert.DoesNotContain("shareToken", body);
+        Assert.DoesNotContain("projectId", body);
+        Assert.DoesNotContain(shared.ShareToken!, body);
+        Assert.DoesNotContain(session.ProjectId.ToString(), body);
 
         var (_, detailBody) = await HttpResultTestHelpers.ExecuteAsync(await SessionEndpoints.GetAsync(session.Id.ToString(), TestPrincipal.For(user), db));
         Assert.Contains(shared.ShareToken!, detailBody);
@@ -106,6 +109,152 @@ public class ShareEndpointsTests : IDisposable
         SharingResponse shared = await SetAsync(user, session, db, true);
         var (_, body) = await HttpResultTestHelpers.ExecuteAsync(await ShareEndpoints.GetAsync(shared.ShareToken!, db));
         Assert.Equal("Level One", JsonSerializer.Deserialize<SharedSessionResponse>(body, Web)!.SceneName);
+    }
+
+    [Fact]
+    public async Task SceneName_FallsBackToUnityName_ThenSceneId()
+    {
+        var (user, session, db) = await SeedAsync();
+        SharingResponse shared = await SetAsync(user, session, db, true);
+        Scene scene = (await db.Scenes.FindAsync(session.ProjectId, "scene1"))!;
+
+        async Task<string> NameAsync() => JsonSerializer.Deserialize<SharedSessionResponse>(
+            (await HttpResultTestHelpers.ExecuteAsync(await ShareEndpoints.GetAsync(shared.ShareToken!, db))).Body, Web)!.SceneName;
+
+        Assert.Equal("scene1", await NameAsync());
+        scene.UnityName = "PlaygroundScene";
+        scene.DisplayName = "  ";
+        await db.SaveChangesAsync();
+        Assert.Equal("PlaygroundScene", await NameAsync());
+        scene.DisplayName = "Level One";
+        await db.SaveChangesAsync();
+        Assert.Equal("Level One", await NameAsync());
+    }
+
+    private static JsonElement Json(string json) => JsonDocument.Parse(json).RootElement.Clone();
+
+    private static async Task<(int Status, string Body)> PutDefaultsAsync(Guid user, Guid project, string? json, MoodyBluesDbContext db) =>
+        await HttpResultTestHelpers.ExecuteAsync(await ProjectEndpoints.SetShareDefaultsAsync(
+            project, new ShareSettingsRequest(json is null ? null : Json(json)), TestPrincipal.For(user), db));
+
+    private static async Task<(int Status, string Body)> PutSettingsAsync(Guid user, Session s, string? json, MoodyBluesDbContext db) =>
+        await HttpResultTestHelpers.ExecuteAsync(await SessionEndpoints.SetShareSettingsAsync(
+            s.Id.ToString(), new ShareSettingsRequest(json is null ? null : Json(json)), TestPrincipal.For(user), db));
+
+    private static async Task<SharedSessionResponse> ShareAsync(string token, MoodyBluesDbContext db) =>
+        JsonSerializer.Deserialize<SharedSessionResponse>(
+            (await HttpResultTestHelpers.ExecuteAsync(await ShareEndpoints.GetAsync(token, db))).Body, Web)!;
+
+    [Fact]
+    public async Task FirstPublic_CopiesTheProjectTemplate_AndLaterTemplateEditsDoNotChangeTheLink()
+    {
+        var (user, session, db) = await SeedAsync();
+        Assert.Equal(200, (await PutDefaultsAsync(user, session.ProjectId, """{"version":1,"camera":{"fov":60}}""", db)).Status);
+
+        SharingResponse shared = await SetAsync(user, session, db, true);
+        Assert.Equal("""{"version":1,"camera":{"fov":60}}""", session.ShareSettingsJson);
+
+        await PutDefaultsAsync(user, session.ProjectId, """{"version":1,"camera":{"fov":30}}""", db);
+        SharedSessionResponse view = await ShareAsync(shared.ShareToken!, db);
+        Assert.Equal(60, view.Settings!.Value.GetProperty("camera").GetProperty("fov").GetInt32());
+
+        // Making it private and public again keeps the link's own settings.
+        await SetAsync(user, session, db, false);
+        await SetAsync(user, session, db, true);
+        Assert.Equal(60, (await ShareAsync(shared.ShareToken!, db)).Settings!.Value.GetProperty("camera").GetProperty("fov").GetInt32());
+    }
+
+    [Fact]
+    public async Task FirstPublic_WithNoTemplate_LeavesSettingsNull()
+    {
+        var (user, session, db) = await SeedAsync();
+        SharingResponse shared = await SetAsync(user, session, db, true);
+        Assert.Null(session.ShareSettingsJson);
+        Assert.Null((await ShareAsync(shared.ShareToken!, db)).Settings);
+    }
+
+    [Fact]
+    public async Task ShareSettings_FallBackFromTheLinkToTheTemplateToNull()
+    {
+        var (user, session, db) = await SeedAsync();
+        SharingResponse shared = await SetAsync(user, session, db, true); // no template yet: link settings stay null
+        Assert.Null((await ShareAsync(shared.ShareToken!, db)).Settings);
+
+        await PutDefaultsAsync(user, session.ProjectId, """{"from":"template"}""", db);
+        Assert.Equal("template", (await ShareAsync(shared.ShareToken!, db)).Settings!.Value.GetProperty("from").GetString());
+
+        await PutSettingsAsync(user, session, """{"from":"link"}""", db);
+        Assert.Equal("link", (await ShareAsync(shared.ShareToken!, db)).Settings!.Value.GetProperty("from").GetString());
+
+        var (status, body) = await PutSettingsAsync(user, session, null, db);
+        Assert.Equal(200, status);
+        Assert.Equal("""{"settings":null}""", body);
+        Assert.Equal("template", (await ShareAsync(shared.ShareToken!, db)).Settings!.Value.GetProperty("from").GetString());
+    }
+
+    [Fact]
+    public async Task Settings_AreReturnedVerbatimAsJson_NotAnEscapedString()
+    {
+        var (user, session, db) = await SeedAsync();
+        var (status, body) = await PutSettingsAsync(user, session, """{"version":1,"panels":{"logs":{"available":true}},"x":[1,2]}""", db);
+        Assert.Equal(200, status);
+        Assert.Equal("""{"settings":{"version":1,"panels":{"logs":{"available":true}},"x":[1,2]}}""", body);
+
+        var (_, detail) = await HttpResultTestHelpers.ExecuteAsync(await SessionEndpoints.GetAsync(session.Id.ToString(), TestPrincipal.For(user), db));
+        Assert.Contains("\"shareSettings\":{\"version\":1", detail);
+
+        var (_, project) = await HttpResultTestHelpers.ExecuteAsync(await ProjectEndpoints.GetAsync(
+            session.ProjectId, TestPrincipal.For(user), db, TestProjects.Config, TestProjects.Protector));
+        Assert.Contains("\"shareDefaults\":null", project);
+        await PutDefaultsAsync(user, session.ProjectId, """{"a":1}""", db);
+        (_, project) = await HttpResultTestHelpers.ExecuteAsync(await ProjectEndpoints.GetAsync(
+            session.ProjectId, TestPrincipal.For(user), db, TestProjects.Config, TestProjects.Protector));
+        Assert.Contains("\"shareDefaults\":{\"a\":1}", project);
+    }
+
+    [Theory]
+    [InlineData("[1,2]")]
+    [InlineData("\"text\"")]
+    [InlineData("42")]
+    [InlineData("true")]
+    public async Task NonObjectSettings_AreRejected(string json)
+    {
+        var (user, session, db) = await SeedAsync();
+        Assert.Equal(400, (await PutSettingsAsync(user, session, json, db)).Status);
+        Assert.Equal(400, (await PutDefaultsAsync(user, session.ProjectId, json, db)).Status);
+        Assert.Null(session.ShareSettingsJson);
+    }
+
+    [Fact]
+    public async Task OversizeSettings_AreRejected_AndTheLimitItselfIsAccepted()
+    {
+        var (user, session, db) = await SeedAsync();
+        string Body(int bytes) => "{\"k\":\"" + new string('x', bytes - 8) + "\"}";
+
+        Assert.Equal(400, (await PutSettingsAsync(user, session, Body(ShareSettingsDocument.MaxBytes + 1), db)).Status);
+        Assert.Equal(400, (await PutDefaultsAsync(user, session.ProjectId, Body(ShareSettingsDocument.MaxBytes + 1), db)).Status);
+        Assert.Equal(200, (await PutSettingsAsync(user, session, Body(ShareSettingsDocument.MaxBytes), db)).Status);
+    }
+
+    [Fact]
+    public async Task NonOwner_CannotChangeSettingsOrDefaults()
+    {
+        var (_, session, db) = await SeedAsync();
+        Guid other = Guid.NewGuid();
+        Assert.Equal(404, (await PutSettingsAsync(other, session, "{}", db)).Status);
+        Assert.Equal(404, (await PutDefaultsAsync(other, session.ProjectId, "{}", db)).Status);
+        Assert.Null(session.ShareSettingsJson);
+    }
+
+    [Fact]
+    public async Task SettingsAndDefaultsChanges_AreAudited()
+    {
+        var (user, session, db) = await SeedAsync();
+        await PutSettingsAsync(user, session, "{}", db);
+        await PutDefaultsAsync(user, session.ProjectId, null, db);
+
+        Assert.Contains(db.AuditEvents, e => e.Action == AuditLog.SessionShareSettings && e.Target == session.Id.ToString());
+        Assert.Contains(db.AuditEvents, e => e.Action == AuditLog.ProjectShareDefaults && e.Target == session.ProjectId.ToString());
     }
 
     [Fact]

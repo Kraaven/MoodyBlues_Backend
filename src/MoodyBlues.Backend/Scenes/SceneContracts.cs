@@ -11,6 +11,8 @@ public sealed record RenameSceneRequest(string? DisplayName);
 public sealed record SceneResponse(
     string SceneId,
     string? DisplayName,
+    /// <summary>The scene's name in Unity, read from its GLB; null when the GLB has none.</summary>
+    string? UnityName,
     DateTime UpdatedAtUtc,
     string LatestHash,
     long SizeBytes,
@@ -40,6 +42,7 @@ public sealed record SceneDetailResponse(
     Guid ProjectId,
     string SceneId,
     string? DisplayName,
+    string? UnityName,
     DateTime CreatedAtUtc,
     DateTime UpdatedAtUtc,
     SceneVersionResponse? Current,
