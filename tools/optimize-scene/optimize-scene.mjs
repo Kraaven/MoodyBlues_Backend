@@ -17,11 +17,34 @@
 // Textures become KTX2 (ETC1S, UASTC for data maps like `gltf-transform optimize`) through the
 // `ktx` CLI from KTX-Software, which must be on PATH. @gltf-transform/cli does not export its
 // toktx helper, so the step below follows it (see the pinned version's src/transforms/toktx.ts).
+//
+// The viewer's "game look" needs baked lighting to survive (data contract: MOODYBLUES_scene):
+//
+//   - the root extension MOODYBLUES_scene is round-tripped, and its lightmap textures are held as
+//     real graph references so prune keeps them and the KTX2 step sees them. gltf-transform
+//     drops extensions it has no class for, so MoodyBluesScene below is mandatory.
+//   - TEXCOORD_1 is kept on every mesh of a node with `extras.lightmap` (nothing in the material
+//     reads it, so prune would delete it) and TEXCOORD is quantized at 16 bits.
+//   - lightmap textures are encoded UASTC, linear, with alpha (RGBM): ETC1S or an sRGB tag would
+//     corrupt the decode `rgb * a * range`.
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ImageUtils, NodeIO, TextureChannel } from '@gltf-transform/core';
+import { pathToFileURL } from 'node:url';
+import {
+  Extension,
+  ExtensionProperty,
+  ImageUtils,
+  Material,
+  NodeIO,
+  Primitive,
+  PropertyType,
+  RefList,
+  Texture,
+  TextureChannel,
+  TextureInfo,
+} from '@gltf-transform/core';
 import { ALL_EXTENSIONS, EXTMeshoptCompression, KHRTextureBasisu } from '@gltf-transform/extensions';
 import {
   dedup,
@@ -38,9 +61,218 @@ import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
 import sharp from 'sharp';
 
 const MAX_TEXTURE_SIZE = 2048;
+const CLAMP_TO_EDGE = 33071; // glTF sampler wrap mode
 // Data maps need the higher-quality UASTC; everything else is ETC1S. Same split as `optimize`.
 const UASTC_SLOTS = /^(normalTexture|occlusionTexture|metallicRoughnessTexture)$/;
 const { R: CHANNEL_R, G: CHANNEL_G, A: CHANNEL_A } = TextureChannel;
+
+const MOODYBLUES_SCENE = 'MOODYBLUES_scene';
+const SCENE_PROPERTY = 'MoodyBluesScene';
+const LIGHTMAP_PROPERTY = 'MoodyBluesLightmap';
+
+/**
+ * One `lightmaps[i]` entry. `texture` is a real reference; every other member (`encoding`, `range`,
+ * and whatever a later contract version adds) is kept as JSON text and written back verbatim. JSON
+ * text rather than an object because property-graph treats plain-object attributes as ref maps.
+ */
+class MoodyBluesLightmap extends ExtensionProperty {
+  static EXTENSION_NAME = MOODYBLUES_SCENE;
+
+  init() {
+    this.extensionName = MOODYBLUES_SCENE;
+    this.propertyType = LIGHTMAP_PROPERTY;
+    this.parentTypes = [SCENE_PROPERTY];
+  }
+
+  getDefaults() {
+    return Object.assign(super.getDefaults(), { texture: null, membersJson: '{}' });
+  }
+
+  getTexture() {
+    return this.getRef('texture');
+  }
+
+  setTexture(texture) {
+    return this.setRef('texture', texture);
+  }
+
+  getMembers() {
+    return JSON.parse(this.get('membersJson'));
+  }
+
+  setMembers(members) {
+    return this.set('membersJson', JSON.stringify(members));
+  }
+}
+
+/** The root `MOODYBLUES_scene` object: the lightmap entries as references, the rest verbatim. */
+class MoodyBluesSceneSettings extends ExtensionProperty {
+  static EXTENSION_NAME = MOODYBLUES_SCENE;
+
+  init() {
+    this.extensionName = MOODYBLUES_SCENE;
+    this.propertyType = SCENE_PROPERTY;
+    this.parentTypes = [PropertyType.ROOT];
+  }
+
+  getDefaults() {
+    return Object.assign(super.getDefaults(), { lightmaps: new RefList(), membersJson: '{}' });
+  }
+
+  listLightmaps() {
+    return this.listRefs('lightmaps');
+  }
+
+  addLightmap(lightmap) {
+    return this.addRef('lightmaps', lightmap);
+  }
+
+  getMembers() {
+    return JSON.parse(this.get('membersJson'));
+  }
+
+  setMembers(members) {
+    return this.set('membersJson', JSON.stringify(members));
+  }
+}
+
+/**
+ * Round-trips the root `MOODYBLUES_scene` extension (listed in extensionsUsed, never required: a
+ * viewer without it still shows the geometry). The glTF writer only emits root extension JSON
+ * from `write()`, but KHR_texture_basisu rewrites `textures[]` in its own `write()`, which runs
+ * first (extensions write in name order). The lightmaps' texture definitions are therefore
+ * created in `prewrite(MATERIAL)`, which runs right after the images exist, so basisu sees them.
+ */
+export class MoodyBluesScene extends Extension {
+  static EXTENSION_NAME = MOODYBLUES_SCENE;
+  extensionName = MOODYBLUES_SCENE;
+  prewriteTypes = [PropertyType.MATERIAL];
+  #textureIndices = new Map();
+
+  /** The settings property on the document's root, if the scene has one. */
+  getSettings() {
+    return this.document.getRoot().getExtension(MOODYBLUES_SCENE);
+  }
+
+  read(context) {
+    const def = context.jsonDoc.json.extensions?.[MOODYBLUES_SCENE];
+    if (!def) return this;
+
+    const { lightmaps = [], ...members } = def;
+    if (!Array.isArray(lightmaps)) throw new Error(`${MOODYBLUES_SCENE}: lightmaps must be an array.`);
+
+    const textureDefs = context.jsonDoc.json.textures ?? [];
+    const settings = new MoodyBluesSceneSettings(this.document.getGraph()).setMembers(members);
+    lightmaps.forEach((lightmapDef, i) => {
+      const { texture: textureIndex, ...rest } = lightmapDef;
+      const source = textureDefs[textureIndex]?.source;
+      const texture = source === undefined ? undefined : context.textures[source];
+      if (!texture) throw new Error(`${MOODYBLUES_SCENE}: lightmaps[${i}].texture ${textureIndex} is not a texture.`);
+      settings.addLightmap(new MoodyBluesLightmap(this.document.getGraph()).setTexture(texture).setMembers(rest));
+    });
+    this.document.getRoot().setExtension(MOODYBLUES_SCENE, settings);
+    return this;
+  }
+
+  prewrite(context) {
+    this.#textureIndices.clear();
+    const settings = this.getSettings();
+    if (!settings) return this;
+
+    // Lightmaps are atlases: wrapping would bleed one chart's edge into the opposite side.
+    const info = new TextureInfo(this.document.getGraph(), 'lightmapTextureInfo')
+      .setWrapS(CLAMP_TO_EDGE)
+      .setWrapT(CLAMP_TO_EDGE);
+    for (const lightmap of settings.listLightmaps()) {
+      const texture = lightmap.getTexture();
+      if (!texture) throw new Error(`${MOODYBLUES_SCENE}: a lightmap lost its texture.`);
+      this.#textureIndices.set(lightmap, context.createTextureInfoDef(texture, info).index);
+    }
+    info.dispose();
+    return this;
+  }
+
+  write(context) {
+    const settings = this.getSettings();
+    if (!settings) return this;
+
+    const lightmaps = settings.listLightmaps().map((lightmap) => ({
+      ...lightmap.getMembers(),
+      texture: this.#textureIndices.get(lightmap),
+    }));
+    const json = context.jsonDoc.json;
+    json.extensions = { ...json.extensions, [MOODYBLUES_SCENE]: { ...settings.getMembers(), lightmaps } };
+    return this;
+  }
+}
+
+/** The textures `MOODYBLUES_scene.lightmaps` points at. */
+function listLightmapTextures(document) {
+  const settings = document.getRoot().getExtension(MOODYBLUES_SCENE);
+  return new Set(settings ? settings.listLightmaps().map((lightmap) => lightmap.getTexture()) : []);
+}
+
+/**
+ * `prune({keepAttributes: false})`'s unused-attribute removal (see the pinned version's
+ * src/transforms/prune.ts: listRequiredSemantics, listUnusedSemantics), except that TEXCOORD_1 is
+ * kept on every primitive of a mesh used by a node with `extras.lightmap`. Prune's follow-up that
+ * renumbers TEXCOORD_n to close gaps is left out: it would rename the lightmap set, and a gap is
+ * valid glTF. Runs before `prune`, which then deletes the accessors this orphans.
+ */
+function pruneUnusedAttributes() {
+  return (document) => {
+    const lightmapped = new Set();
+    for (const node of document.getRoot().listNodes()) {
+      const mesh = node.getMesh();
+      if (mesh && node.getExtras().lightmap) lightmapped.add(mesh);
+    }
+
+    for (const mesh of document.getRoot().listMeshes()) {
+      for (const prim of mesh.listPrimitives()) {
+        const material = prim.getMaterial();
+        if (!material) continue;
+
+        const required = listRequiredSemantics(document, prim, material);
+        if (lightmapped.has(mesh)) required.add('TEXCOORD_1');
+        const unused = prim.listSemantics().filter((semantic) => isUnusedSemantic(semantic, required));
+        for (const semantic of unused) prim.setAttribute(semantic, null);
+        for (const target of prim.listTargets()) {
+          for (const semantic of unused) target.setAttribute(semantic, null);
+        }
+      }
+    }
+  };
+}
+
+function isUnusedSemantic(semantic, required) {
+  if (semantic === 'NORMAL' || semantic === 'TANGENT' || semantic.startsWith('TEXCOORD_')) {
+    return !required.has(semantic);
+  }
+  return semantic.startsWith('COLOR_') && semantic !== 'COLOR_0';
+}
+
+/** Attributes a material needs (not the unconditional POSITION): texcoord sets, TANGENT, NORMAL. */
+function listRequiredSemantics(document, prim, material, semantics = new Set()) {
+  const edges = document.getGraph().listChildEdges(material);
+  const textureNames = new Set();
+  for (const edge of edges) {
+    if (edge.getChild() instanceof Texture) textureNames.add(edge.getName());
+  }
+
+  for (const edge of edges) {
+    const name = edge.getName();
+    const child = edge.getChild();
+    if (child instanceof TextureInfo && textureNames.has(name.replace(/Info$/, ''))) {
+      semantics.add(`TEXCOORD_${child.getTexCoord()}`);
+    }
+    if (child instanceof Texture && /normalTexture/i.test(name)) semantics.add('TANGENT');
+    if (child instanceof ExtensionProperty) listRequiredSemantics(document, prim, child, semantics);
+  }
+
+  const isLit = material instanceof Material && !material.getExtension('KHR_materials_unlit');
+  if (isLit && prim.getMode() !== Primitive.Mode.POINTS) semantics.add('NORMAL');
+  return semantics;
+}
 
 function log(message) {
   console.error(`optimize-scene: ${message}`);
@@ -54,6 +286,26 @@ function runKtx(args) {
     child.on('error', (err) => reject(new Error(`could not run "ktx" (KTX-Software must be on PATH): ${err.message}`)));
     child.on('close', (code) => resolve({ code, stderr }));
   });
+}
+
+function threadParams(numTextures) {
+  const cpus = os.cpus().length || 1;
+  return numTextures > 1 ? ['--threads', Math.max(2, Math.min(cpus, Math.round((3 * cpus) / numTextures)))] : [];
+}
+
+/**
+ * Lightmaps are RGBM in linear space and have no material slot, so ktxParams' slot-derived color
+ * space and channels do not apply. UASTC without RDO: RDO's smoothing would put visible steps in
+ * the multiplier in alpha, which is amplified by `range`.
+ */
+function lightmapKtxParams(numTextures) {
+  return [
+    '--generate-mipmap',
+    '--encode', 'uastc', '--uastc-quality', 4, '--zstd', 18,
+    '--assign-tf', 'linear', '--assign-primaries', 'none',
+    '--format', 'R8G8B8A8_UNORM',
+    ...threadParams(numTextures),
+  ];
 }
 
 function ktxParams(texture, slots, isUastc, numTextures) {
@@ -80,9 +332,7 @@ function ktxParams(texture, slots, isUastc, numTextures) {
   else if (!(channels & CHANNEL_A)) params.push('--format', colorSpace === 'srgb' ? 'R8G8B8_SRGB' : 'R8G8B8_UNORM');
   else params.push('--format', colorSpace === 'srgb' ? 'R8G8B8A8_SRGB' : 'R8G8B8A8_UNORM');
 
-  const cpus = os.cpus().length || 1;
-  if (numTextures > 1) params.push('--threads', Math.max(2, Math.min(cpus, Math.round((3 * cpus) / numTextures))));
-  return params;
+  return [...params, ...threadParams(numTextures)];
 }
 
 /** Resizes (to at most MAX_TEXTURE_SIZE, dimensions rounded up to a multiple of four) and encodes every PNG/JPEG as KTX2. */
@@ -93,6 +343,7 @@ function ktx2() {
     if (work.length === 0) return;
 
     const basisu = document.createExtension(KHRTextureBasisu).setRequired(true);
+    const lightmaps = listLightmapTextures(document);
     const dir = await mkdtemp(path.join(os.tmpdir(), 'moodyblues-ktx-'));
     try {
       const jobs = Math.max(1, Math.min(os.cpus().length || 1, 4));
@@ -100,7 +351,7 @@ function ktx2() {
       const worker = async () => {
         while (next < work.length) {
           const index = next++;
-          await encodeTexture(work[index], index, work.length, dir);
+          await encodeTexture(work[index], index, work.length, dir, lightmaps.has(work[index]));
         }
       };
       await Promise.all(Array.from({ length: jobs }, worker));
@@ -112,7 +363,7 @@ function ktx2() {
   };
 }
 
-async function encodeTexture(texture, index, total, dir) {
+async function encodeTexture(texture, index, total, dir, isLightmap) {
   const label = `texture ${texture.getName() || texture.getURI() || index + 1}`;
   let image = texture.getImage();
   let mimeType = texture.getMimeType();
@@ -140,7 +391,8 @@ async function encodeTexture(texture, index, total, dir) {
   await writeFile(src, image);
 
   const isUastc = slots.some((slot) => UASTC_SLOTS.test(slot));
-  const args = ['create', ...ktxParams(texture, slots, isUastc, total), src, dst];
+  const params = isLightmap ? lightmapKtxParams(total) : ktxParams(texture, slots, isUastc, total);
+  const args = ['create', ...params, src, dst];
   const { code, stderr } = await runKtx(args);
   if (code !== 0) {
     throw new Error(`${label}: ktx exited ${code}: ${stderr.trim()}`);
@@ -163,6 +415,8 @@ function meshoptWithoutPositionQuantization(encoder) {
         pattern: /^(TEXCOORD|JOINTS|WEIGHTS|COLOR)(_\d+)?$/,
         patternTargets: /^(POSITION|TEXCOORD|JOINTS|WEIGHTS|COLOR|NORMAL|TANGENT)(_\d+)?$/,
         quantizeNormal: 8,
+        // Lightmap UVs index an atlas; the default 12 bits is too coarse for it.
+        quantizeTexcoord: 16,
       }),
     );
     document
@@ -172,33 +426,45 @@ function meshoptWithoutPositionQuantization(encoder) {
   };
 }
 
+/** The optimization pipeline (see the header); `encodeTextures: false` skips the `ktx` step. */
+export async function optimizeDocument(document, { encoder = MeshoptEncoder, encodeTextures = true } = {}) {
+  await document.transform(
+    dedup(),
+    weld(),
+    pruneUnusedAttributes(),
+    prune({ keepLeaves: true, keepAttributes: true, keepSolidTextures: false, keepExtras: true }),
+    ...(encodeTextures ? [ktx2()] : []),
+    meshoptWithoutPositionQuantization(encoder),
+  );
+}
+
+export async function createOptimizerIO() {
+  await Promise.all([MeshoptDecoder.ready, MeshoptEncoder.ready]);
+  return new NodeIO()
+    .registerExtensions([...ALL_EXTENSIONS, MoodyBluesScene])
+    .registerDependencies({ 'meshopt.decoder': MeshoptDecoder, 'meshopt.encoder': MeshoptEncoder });
+}
+
 async function main() {
   const [input, output] = process.argv.slice(2);
   if (!input || !output) {
     throw new Error('usage: node optimize-scene.mjs <input.glb> <output.glb>');
   }
 
-  await Promise.all([MeshoptDecoder.ready, MeshoptEncoder.ready]);
-  const io = new NodeIO()
-    .registerExtensions(ALL_EXTENSIONS)
-    .registerDependencies({ 'meshopt.decoder': MeshoptDecoder, 'meshopt.encoder': MeshoptEncoder });
-
+  const io = await createOptimizerIO();
   const document = await io.read(input);
   log(`read ${input}: ${document.getRoot().listNodes().length} nodes, ${document.getRoot().listTextures().length} textures.`);
 
-  await document.transform(
-    dedup(),
-    weld(),
-    prune({ keepLeaves: true, keepAttributes: false, keepSolidTextures: false, keepExtras: true }),
-    ktx2(),
-    meshoptWithoutPositionQuantization(MeshoptEncoder),
-  );
+  await optimizeDocument(document);
 
   await io.write(output, document);
   log(`wrote ${output}.`);
 }
 
-main().catch((err) => {
-  console.error(`optimize-scene: failed: ${err?.stack ?? err}`);
-  process.exit(1);
-});
+// Only when run as a script, so the tests can import the pipeline.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`optimize-scene: failed: ${err?.stack ?? err}`);
+    process.exit(1);
+  });
+}

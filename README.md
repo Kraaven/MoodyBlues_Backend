@@ -274,6 +274,14 @@ The upload is processed in the background (`Scenes/Processing/`):
    quantized (that would rewrite node transforms). A gzipped copy, `optimized.glb.gz`, is
    written next to it. If optimization fails, the raw upload is served instead.
 
+   The viewer's baked lighting survives it: the root `MOODYBLUES_scene` extension (never
+   required) is round-tripped with every member, its lightmap textures are kept (they are
+   references, so prune cannot drop them) and encoded as KTX2 UASTC in linear color with alpha
+   (RGBM; never ETC1S or sRGB); `TEXCOORD_1` is kept on the meshes of nodes with
+   `extras.lightmap` (other unused attributes are still removed); and UVs are quantized at
+   16 bits. `npm test` in `tools/optimize-scene` runs the optimizer's tests (the KTX2 assertions
+   are skipped when `ktx` is not installed).
+
 ### `GET /stream` (WebSocket)
 
 - **Auth:** the handshake's stream token, in the `X-MoodyBlues-Stream-Token` header of the
